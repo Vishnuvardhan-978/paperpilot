@@ -62,8 +62,13 @@ export function downloadText(filename: string, content: string, mime: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  // keep URL alive briefly so the download can start
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
 export function exportChatMarkdown(session: ChatSession) {

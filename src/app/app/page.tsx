@@ -305,7 +305,7 @@ export default function App() {
       <div className="relative z-10 flex min-w-0 flex-1 flex-col">
 
         {/* top bar */}
-        <header className="relative flex h-14 shrink-0 items-center gap-3 border-b border-white/[0.06] bg-[rgba(6,9,26,0.7)] px-4 backdrop-blur-xl">
+        <header className="relative z-50 flex h-14 shrink-0 items-center gap-3 border-b border-white/[0.06] bg-[rgba(6,9,26,0.95)] px-4 backdrop-blur-xl">
           <button onClick={() => setNavOpen(true)} className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-[#415570] hover:border-white/[0.15] hover:text-[#8ca3be] lg:hidden"><I.menu /></button>
 
           {/* doc badge */}
@@ -322,38 +322,61 @@ export default function App() {
           </div>
 
           {/* actions */}
-          <div className="relative flex items-center gap-2">
+          <div className="relative z-50 flex items-center gap-2">
             {session.messages.length > 0 && (
-              <>
+              <div className="relative">
                 <button
-                  onClick={() => setExportOpen((v) => !v)}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExportOpen((v) => !v);
+                  }}
                   className="flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-[#00d4aa]/40 hover:text-[#00d4aa]"
                 >
                   <I.download /><span className="hidden sm:inline">Export</span>
                 </button>
                 {exportOpen && (
                   <>
-                    <button aria-label="Close export" className="fixed inset-0 z-40" onClick={() => setExportOpen(false)} />
-                    <div className="absolute right-0 top-10 z-50 w-44 overflow-hidden rounded-xl border border-white/[0.1] bg-[#0b1127] shadow-2xl">
+                    <button
+                      type="button"
+                      aria-label="Close export"
+                      className="fixed inset-0 z-[60] cursor-default bg-transparent"
+                      onClick={() => setExportOpen(false)}
+                    />
+                    <div className="absolute right-0 top-full z-[70] mt-2 w-52 overflow-hidden rounded-xl border border-white/[0.12] bg-[#101828] shadow-[0_12px_40px_rgba(0,0,0,0.55)]">
+                      <p className="border-b border-white/[0.06] px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-[#415570]">
+                        Save conversation
+                      </p>
                       <button
-                        onClick={() => { exportChatMarkdown(session); setExportOpen(false); }}
-                        className="block w-full px-4 py-2.5 text-left text-sm text-[#8ca3be] transition hover:bg-white/[0.05] hover:text-white"
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          exportChatMarkdown(session);
+                          setExportOpen(false);
+                        }}
+                        className="block w-full px-4 py-3 text-left text-sm text-[#e2e8f0] transition hover:bg-[#00d4aa]/10 hover:text-[#00d4aa]"
                       >
-                        Download .md
+                        Download Markdown (.md)
                       </button>
                       <button
-                        onClick={() => { exportChatText(session); setExportOpen(false); }}
-                        className="block w-full px-4 py-2.5 text-left text-sm text-[#8ca3be] transition hover:bg-white/[0.05] hover:text-white"
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          exportChatText(session);
+                          setExportOpen(false);
+                        }}
+                        className="block w-full px-4 py-3 text-left text-sm text-[#e2e8f0] transition hover:bg-[#00d4aa]/10 hover:text-[#00d4aa]"
                       >
-                        Download .txt
+                        Download Text (.txt)
                       </button>
                     </div>
                   </>
                 )}
-              </>
+              </div>
             )}
             {session.document && session.messages.length > 1 && (
               <button
+                type="button"
                 onClick={clearMessages}
                 title="Clear chat"
                 className="hidden items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-red-400/40 hover:text-red-400 sm:flex"
@@ -361,7 +384,7 @@ export default function App() {
                 Clear
               </button>
             )}
-            <button onClick={newChat} className="hidden items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-[#00d4aa]/40 hover:text-[#00d4aa] lg:flex">
+            <button type="button" onClick={newChat} className="hidden items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-[#00d4aa]/40 hover:text-[#00d4aa] lg:flex">
               <I.plus /><span>New</span>
             </button>
           </div>
