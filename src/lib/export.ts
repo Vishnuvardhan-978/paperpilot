@@ -1,10 +1,12 @@
 import type { ChatSession } from "@/lib/chat-store";
+import { getDocuments } from "@/lib/chat-store";
 
 function safeName(title: string) {
   return title.replace(/[^\w\-]+/g, "-").replace(/-+/g, "-").slice(0, 40) || "paperpilot-chat";
 }
 
 export function chatToMarkdown(session: ChatSession) {
+  const docs = getDocuments(session);
   const lines: string[] = [
     `# ${session.title}`,
     "",
@@ -12,17 +14,14 @@ export function chatToMarkdown(session: ChatSession) {
     "",
   ];
 
-  if (session.document) {
-    lines.push(
-      `**Document:** ${session.document.name}`,
-      `**Pages:** ${session.document.pages}`,
-      session.document.sizeBytes
-        ? `**Size:** ${formatBytes(session.document.sizeBytes)}`
-        : "",
-      "",
-      "---",
-      "",
-    );
+  if (docs.length) {
+    lines.push(`**Documents (${docs.length}):**`);
+    for (const d of docs) {
+      lines.push(
+        `- ${d.name} · ${d.pages} pages${d.sizeBytes ? ` · ${formatBytes(d.sizeBytes)}` : ""}`,
+      );
+    }
+    lines.push("", "---", "");
   }
 
   for (const msg of session.messages) {
@@ -34,18 +33,15 @@ export function chatToMarkdown(session: ChatSession) {
 }
 
 export function chatToText(session: ChatSession) {
+  const docs = getDocuments(session);
   const lines: string[] = [
     session.title,
     `Exported from PaperPilot · ${new Date().toLocaleString()}`,
     "",
   ];
 
-  if (session.document) {
-    lines.push(
-      `Document: ${session.document.name}`,
-      `Pages: ${session.document.pages}`,
-      "",
-    );
+  if (docs.length) {
+    lines.push(`Documents: ${docs.map((d) => d.name).join(", ")}`, "");
   }
 
   for (const msg of session.messages) {
@@ -67,7 +63,6 @@ export function downloadText(filename: string, content: string, mime: string) {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  // keep URL alive briefly so the download can start
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
@@ -85,6 +80,10 @@ export function exportChatText(session: ChatSession) {
     chatToText(session),
     "text/plain;charset=utf-8",
   );
+}
+
+export function shareChatText(session: ChatSession) {
+  return chatToText(session);
 }
 
 export function formatBytes(bytes: number) {

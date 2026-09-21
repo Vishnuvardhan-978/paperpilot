@@ -32,7 +32,7 @@ function isRetryable(error: unknown) {
   );
 }
 
-export async function generateWithFallback(prompt: string) {
+export async function* streamWithFallback(prompt: string): AsyncGenerator<string> {
   const genAI = getClient();
   let lastError: unknown;
 
@@ -41,11 +41,18 @@ export async function generateWithFallback(prompt: string) {
 
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const result = await model.generateContent(prompt);
-        const text = result.response.text().trim();
-        if (text) {
-          return text;
+        const result = await model.generateContentStream(prompt);
+        let yielded = false;
+
+        for await (const chunk of result.stream) {
+          const text = chunk.text();
+          if (text) {
+            yielded = true;
+            yield text;
+          }
         }
+
+        if (yielded) return;
         throw new Error("Empty response from Gemini");
       } catch (error) {
         lastError = error;
@@ -64,4 +71,56 @@ export async function generateWithFallback(prompt: string) {
   throw lastError instanceof Error
     ? lastError
     : new Error("Gemini is busy. Please try again in a moment.");
+}
+
+export function buildAskPrompt(
+  question: string,
+  documentText: string,
+  documentName: string,
+) {
+  return `You are PaperPilot, an assistant that answers questions using only the provided document(s).
+
+Rules:
+- Answer clearly and helpfully.
+- Use only facts found in the document(s).
+- If the answer is not in the documents, say you cannot find it.
+- When multiple documents are provided, say which document a fact comes from when useful.
+- Quote short supporting snippets when useful.
+- Keep answers concise unless the user asks for detail.
+- Use markdown formatting (bold, lists) when it helps readability.
+
+Document(s): ${documentName}
+
+Document content:
+"""
+${documentText.slice(0, 100000)}
+"""
+
+User question: ${question}`;
+}
+
+export function formatAskError(error: unknown): { message: string; status: number } {
+  let message = "Gemini request failed. Try again.";
+  let status = 500;
+
+  if (error instanceof Error) {
+    if (error.message.includes("GEMINI_API_KEY")) {
+      message = error.message;
+    } else if (error.message.includes("[401]") || error.message.includes("API key")) {
+      message = "Invalid Gemini API key. Update GEMINI_API_KEY in Vercel settings.";
+    } else if (error.message.includes("[404]")) {
+      message = "Gemini model not found. Please try again shortly.";
+    } else if (
+      error.message.includes("[503]") ||
+      error.message.includes("[429]") ||
+      error.message.toLowerCase().includes("high demand")
+    ) {
+      message = "AI is busy right now. Please wait a few seconds and try again.";
+      status = 503;
+    } else {
+      message = error.message.slice(0, 240);
+    }
+  }
+
+  return { message, status };
 }

@@ -5,12 +5,15 @@ export type Message = {
 };
 
 export type DocumentMeta = {
+  id: string;
   name: string;
   pages: number;
   text: string;
   sizeBytes?: number;
   charCount?: number;
   preview?: string;
+  /** PDF bytes for in-app preview (IndexedDB structured clone) */
+  pdfBytes?: ArrayBuffer;
 };
 
 export type ChatSession = {
@@ -18,14 +21,19 @@ export type ChatSession = {
   title: string;
   createdAt: number;
   updatedAt: number;
-  document: DocumentMeta | null;
+  /** @deprecated use documents */
+  document?: DocumentMeta | null;
+  documents: DocumentMeta[];
   messages: Message[];
 };
 
 const DB_NAME = "paperpilot";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = "chats";
 const ACTIVE_KEY = "paperpilot-active-chat";
+const ONBOARD_KEY = "paperpilot-onboarded-v1";
+
+export const MAX_DOCS = 3;
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -51,6 +59,28 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
+export function normalizeSession(raw: ChatSession): ChatSession {
+  const docs =
+    raw.documents?.length
+      ? raw.documents
+      : raw.document
+        ? [{ ...raw.document, id: raw.document.id || crypto.randomUUID() }]
+        : [];
+
+  return {
+    ...raw,
+    documents: docs.map((d) => ({
+      ...d,
+      id: d.id || crypto.randomUUID(),
+    })),
+    document: null,
+  };
+}
+
+export function getDocuments(session: ChatSession): DocumentMeta[] {
+  return normalizeSession(session).documents;
+}
+
 export function createEmptySession(): ChatSession {
   const now = Date.now();
   return {
@@ -59,6 +89,7 @@ export function createEmptySession(): ChatSession {
     createdAt: now,
     updatedAt: now,
     document: null,
+    documents: [],
     messages: [],
   };
 }
@@ -69,7 +100,7 @@ export async function listChats(): Promise<ChatSession[]> {
   const store = tx.objectStore(STORE);
   const chats = await requestToPromise(store.getAll() as IDBRequest<ChatSession[]>);
   db.close();
-  return chats.sort((a, b) => b.updatedAt - a.updatedAt);
+  return chats.map(normalizeSession).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function getChat(id: string): Promise<ChatSession | null> {
@@ -78,14 +109,15 @@ export async function getChat(id: string): Promise<ChatSession | null> {
   const store = tx.objectStore(STORE);
   const chat = await requestToPromise(store.get(id) as IDBRequest<ChatSession | undefined>);
   db.close();
-  return chat ?? null;
+  return chat ? normalizeSession(chat) : null;
 }
 
 export async function saveChat(chat: ChatSession): Promise<void> {
   const db = await openDb();
   const tx = db.transaction(STORE, "readwrite");
   const store = tx.objectStore(STORE);
-  await requestToPromise(store.put({ ...chat, updatedAt: Date.now() }));
+  const normalized = normalizeSession({ ...chat, updatedAt: Date.now() });
+  await requestToPromise(store.put(normalized));
   db.close();
 }
 
@@ -116,4 +148,27 @@ export function clearActiveChatId() {
 
 export function titleFromDocument(name: string) {
   return name.replace(/\.pdf$/i, "").slice(0, 48) || "Untitled PDF";
+}
+
+export function hasSeenOnboarding() {
+  if (typeof window === "undefined") return true;
+  return localStorage.getItem(ONBOARD_KEY) === "1";
+}
+
+export function markOnboardingSeen() {
+  localStorage.setItem(ONBOARD_KEY, "1");
+}
+
+export function combinedDocumentText(docs: DocumentMeta[]) {
+  return docs
+    .map(
+      (d, i) =>
+        `=== Document ${i + 1}: ${d.name} (${d.pages} pages) ===\n${d.text}`,
+    )
+    .join("\n\n")
+    .slice(0, 100000);
+}
+
+export function documentNames(docs: DocumentMeta[]) {
+  return docs.map((d) => d.name).join(", ") || "document.pdf";
 }
