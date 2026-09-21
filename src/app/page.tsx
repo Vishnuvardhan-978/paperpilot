@@ -2,7 +2,7 @@ import Link from "next/link";
 
 export default function Home() {
   return (
-    <div className="relative min-h-full overflow-hidden bg-[#06091a] text-[#f0f4ff]">
+    <div className="relative min-h-full overflow-x-hidden bg-[#06091a] text-[#f0f4ff]">
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0"
@@ -30,7 +30,7 @@ export default function Home() {
       </header>
 
       <main className="relative z-10 mx-auto w-full max-w-6xl px-6 pb-20 pt-10 md:pt-16">
-        <section className="animate-rise flex min-h-[58vh] max-w-3xl flex-col justify-center">
+        <section className="animate-rise flex max-w-3xl flex-col justify-center pt-6 pb-10 md:min-h-[52vh] md:pt-0">
           <h1 className="font-[family-name:var(--font-display)] text-5xl font-semibold leading-[1.05] tracking-tight text-white md:text-7xl">
             PaperPilot
           </h1>

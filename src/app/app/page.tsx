@@ -84,6 +84,7 @@ function CopyBtn({ text, label = "Copy" }: { text: string; label?: string }) {
 
 export default function App() {
   const fileRef = useRef<HTMLInputElement>(null);
+  const attachRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
@@ -108,8 +109,36 @@ export default function App() {
 
   const previewUrl = useMemo(() => {
     if (!previewDoc?.pdfBytes) return null;
-    return URL.createObjectURL(new Blob([previewDoc.pdfBytes], { type: "application/pdf" }));
+    try {
+      const raw = previewDoc.pdfBytes;
+      const bytes = raw instanceof ArrayBuffer ? new Uint8Array(raw) : new Uint8Array(raw as ArrayBuffer);
+      if (!bytes.byteLength) return null;
+      return URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+    } catch {
+      return null;
+    }
   }, [previewDoc]);
+
+  function togglePreview() {
+    if (!docs.length) return;
+    if (!previewOpen) {
+      if (!previewDoc?.pdfBytes) {
+        setError("PDF preview needs a fresh upload. Remove and re-add the file, then try Show PDF.");
+        return;
+      }
+      setPreviewOpen(true);
+      return;
+    }
+    setPreviewOpen(false);
+  }
+
+  function openAttachPicker() {
+    if (docs.length >= MAX_DOCS) {
+      setError(`Max ${MAX_DOCS} PDFs per chat. Remove one first.`);
+      return;
+    }
+    attachRef.current?.click();
+  }
 
   useEffect(() => {
     return () => {
@@ -162,7 +191,7 @@ export default function App() {
       }
       if (meta && e.key.toLowerCase() === "p" && docs.length) {
         e.preventDefault();
-        setPreviewOpen((v) => !v);
+        togglePreview();
       }
       if (e.key === "Escape") {
         setExportOpen(false);
@@ -232,7 +261,7 @@ export default function App() {
     setError(null);
     setUploading(true);
     try {
-      const pdfBytes = await file.arrayBuffer();
+      const pdfBytes = (await file.arrayBuffer()).slice(0);
       const fd = new FormData();
       fd.append("file", file);
       const r = await fetch("/api/extract", { method: "POST", body: fd });
@@ -271,12 +300,14 @@ export default function App() {
       });
       setPreviewDocId(doc.id);
       setPreviewOpen(true);
+      setError(null);
       setTimeout(() => inputRef.current?.focus(), 100);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = "";
+      if (attachRef.current) attachRef.current.value = "";
     }
   }
 
@@ -507,7 +538,7 @@ export default function App() {
           </div>
           <div className="relative z-50 flex items-center gap-2">
             {docs.length > 0 && (
-              <button type="button" onClick={() => setPreviewOpen((v) => !v)} className="flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] hover:text-[#00d4aa]" title="Ctrl+P">
+              <button type="button" onClick={togglePreview} className="flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] hover:text-[#00d4aa]" title="Ctrl+P">
                 <I.eye /><span className="hidden sm:inline">{previewOpen ? "Hide PDF" : "Show PDF"}</span>
               </button>
             )}
@@ -635,20 +666,39 @@ export default function App() {
                 onSubmit={(e) => { e.preventDefault(); ask(q); }}
                 className="mx-auto flex max-w-2xl items-center gap-2"
               >
-                <input
-                  ref={inputRef}
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      ask(q);
-                    }
-                  }}
-                  disabled={!docs.length || asking}
-                  placeholder={docs.length ? "Ask anything… (Enter to send)" : "Upload a PDF to start"}
-                  className="flex-1 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3.5 text-sm text-white outline-none placeholder:text-[#415570] focus:border-[#00d4aa]/40 disabled:opacity-40"
-                />
+                <div className={`flex min-w-0 flex-1 items-center gap-1 rounded-2xl border bg-white/[0.03] pl-2 pr-3 transition ${q ? "border-[#00d4aa]/40" : "border-white/[0.08] focus-within:border-[#00d4aa]/40"}`}>
+                  <button
+                    type="button"
+                    onClick={openAttachPicker}
+                    disabled={uploading || asking || docs.length >= MAX_DOCS}
+                    title={docs.length ? "Add another PDF" : "Upload PDF"}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[#8ca3be] transition hover:bg-white/[0.06] hover:text-[#00d4aa] disabled:opacity-40"
+                  >
+                    <I.plus />
+                  </button>
+                  <input
+                    ref={attachRef}
+                    type="file"
+                    accept="application/pdf"
+                    className="hidden"
+                    disabled={uploading || asking}
+                    onChange={(e) => upload(e.target.files?.[0])}
+                  />
+                  <input
+                    ref={inputRef}
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        ask(q);
+                      }
+                    }}
+                    disabled={!docs.length || asking}
+                    placeholder={docs.length ? "Ask anything… (Enter to send)" : "Tap + to upload a PDF"}
+                    className="min-w-0 flex-1 bg-transparent py-3.5 text-sm text-white outline-none placeholder:text-[#415570] disabled:opacity-40"
+                  />
+                </div>
                 <button type="submit" disabled={!docs.length || asking || !q.trim()} className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#00d4aa] to-[#0ea5e9] text-white shadow-[0_0_20px_rgba(0,212,170,0.3)] disabled:opacity-30">
                   {asking ? <Spinner /> : <I.send />}
                 </button>
@@ -656,21 +706,37 @@ export default function App() {
             </div>
           </div>
 
-          {/* PDF preview panel */}
-          {previewOpen && previewDoc?.pdfBytes && previewUrl && (
-            <aside className="hidden w-[42%] min-w-[320px] max-w-[520px] flex-col border-l border-white/[0.06] bg-[rgba(11,17,39,0.6)] xl:flex">
+          {/* PDF preview — desktop side panel */}
+          {previewOpen && previewUrl && (
+            <aside className="hidden min-h-0 w-[42%] min-w-[320px] max-w-[520px] flex-col border-l border-white/[0.06] bg-[rgba(11,17,39,0.85)] lg:flex">
               <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-3">
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold text-white">{previewDoc.name}</div>
+                  <div className="truncate text-sm font-semibold text-white">{previewDoc?.name}</div>
                   <div className="text-[11px] text-[#415570]">Live PDF preview</div>
                 </div>
                 <button type="button" onClick={() => setPreviewOpen(false)} className="rounded-lg p-1.5 text-[#415570] hover:text-white"><I.close /></button>
               </div>
-              <iframe title="PDF preview" src={previewUrl} className="h-full w-full bg-[#0b1127]" />
+              <iframe title="PDF preview" src={`${previewUrl}#toolbar=1`} className="min-h-0 flex-1 w-full bg-[#0b1127]" />
             </aside>
           )}
         </div>
       </div>
+
+      {/* PDF preview — mobile / tablet overlay */}
+      {previewOpen && previewUrl && (
+        <div className="fixed inset-0 z-[80] flex flex-col bg-[#06091a] lg:hidden">
+          <div className="flex items-center justify-between border-b border-white/[0.08] px-4 py-3">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-white">{previewDoc?.name}</div>
+              <div className="text-[11px] text-[#415570]">PDF preview</div>
+            </div>
+            <button type="button" onClick={() => setPreviewOpen(false)} className="rounded-lg border border-white/[0.1] px-3 py-1.5 text-sm text-[#8ca3be]">
+              Hide
+            </button>
+          </div>
+          <iframe title="PDF preview mobile" src={`${previewUrl}#toolbar=1`} className="min-h-0 flex-1 w-full bg-[#0b1127]" />
+        </div>
+      )}
 
       {/* onboarding */}
       {showOnboard && (
