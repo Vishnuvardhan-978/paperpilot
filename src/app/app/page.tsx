@@ -22,6 +22,12 @@ import {
   setActiveChatId,
   titleFromDocument,
 } from "@/lib/chat-store";
+import {
+  exportChatMarkdown,
+  exportChatText,
+  formatBytes,
+  formatChars,
+} from "@/lib/export";
 
 const CHIPS = [
   "Summarize this document",
@@ -41,6 +47,8 @@ const I = {
   check: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} className="h-3.5 w-3.5 text-[#00d4aa]"><polyline points="20 6 9 17 4 12"/></svg>,
   copy:  () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-3.5 w-3.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>,
   warn:  () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4 shrink-0 text-red-400"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+  download: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+  clear: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg>,
 };
 
 function Spinner({ size = "h-4 w-4" }: { size?: string }) {
@@ -77,6 +85,7 @@ export default function App() {
   const [error,       setError]       = useState<string | null>(null);
   const [navOpen,     setNavOpen]     = useState(false);
   const [drag,        setDrag]        = useState(false);
+  const [exportOpen,  setExportOpen]  = useState(false);
   const [, tx] = useTransition();
 
   const refresh = useCallback(async (id?: string | null) => {
@@ -134,10 +143,17 @@ export default function App() {
       await save({
         ...session,
         title: titleFromDocument(d.name),
-        document: { name: d.name, pages: d.pages, text: d.text },
+        document: {
+          name: d.name,
+          pages: d.pages,
+          text: d.text,
+          sizeBytes: d.sizeBytes,
+          charCount: d.charCount,
+          preview: d.preview,
+        },
         messages: [{
           id: crypto.randomUUID(), role: "assistant",
-          content: `📄 **"${d.name}"** loaded — ${d.pages} ${d.pages===1?"page":"pages"}.\n\nAsk me anything.`,
+          content: `📄 **"${d.name}"** loaded — ${d.pages} ${d.pages===1?"page":"pages"}${d.sizeBytes ? ` · ${formatBytes(d.sizeBytes)}` : ""}.\n\nAsk me anything.`,
         }],
       });
       setTimeout(() => inputRef.current?.focus(), 100);
@@ -169,6 +185,28 @@ export default function App() {
       setAsking(false);
       setTimeout(() => inputRef.current?.focus(), 80);
     }
+  }
+
+  async function clearMessages() {
+    if (!session.document) return;
+    await save({
+      ...session,
+      messages: [{
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: `Chat cleared. **"${session.document.name}"** is still loaded — ask a new question.`,
+      }],
+    });
+  }
+
+  async function removeDocument() {
+    await save({
+      ...session,
+      title: "New chat",
+      document: null,
+      messages: [],
+    });
+    setError(null);
   }
 
   /* ── loading ── */
@@ -284,47 +322,131 @@ export default function App() {
           </div>
 
           {/* actions */}
-          <button onClick={newChat} className="hidden items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-[#00d4aa]/40 hover:text-[#00d4aa] lg:flex">
-            <I.plus /><span>New</span>
-          </button>
+          <div className="relative flex items-center gap-2">
+            {session.messages.length > 0 && (
+              <>
+                <button
+                  onClick={() => setExportOpen((v) => !v)}
+                  className="flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-[#00d4aa]/40 hover:text-[#00d4aa]"
+                >
+                  <I.download /><span className="hidden sm:inline">Export</span>
+                </button>
+                {exportOpen && (
+                  <>
+                    <button aria-label="Close export" className="fixed inset-0 z-40" onClick={() => setExportOpen(false)} />
+                    <div className="absolute right-0 top-10 z-50 w-44 overflow-hidden rounded-xl border border-white/[0.1] bg-[#0b1127] shadow-2xl">
+                      <button
+                        onClick={() => { exportChatMarkdown(session); setExportOpen(false); }}
+                        className="block w-full px-4 py-2.5 text-left text-sm text-[#8ca3be] transition hover:bg-white/[0.05] hover:text-white"
+                      >
+                        Download .md
+                      </button>
+                      <button
+                        onClick={() => { exportChatText(session); setExportOpen(false); }}
+                        className="block w-full px-4 py-2.5 text-left text-sm text-[#8ca3be] transition hover:bg-white/[0.05] hover:text-white"
+                      >
+                        Download .txt
+                      </button>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+            {session.document && session.messages.length > 1 && (
+              <button
+                onClick={clearMessages}
+                title="Clear chat"
+                className="hidden items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-red-400/40 hover:text-red-400 sm:flex"
+              >
+                Clear
+              </button>
+            )}
+            <button onClick={newChat} className="hidden items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3.5 py-1.5 text-[13px] font-semibold text-[#8ca3be] transition hover:border-[#00d4aa]/40 hover:text-[#00d4aa] lg:flex">
+              <I.plus /><span>New</span>
+            </button>
+          </div>
         </header>
 
-        {/* upload strip */}
+        {/* upload / PDF panel */}
         <div className="shrink-0 border-b border-white/[0.06] bg-[rgba(6,9,26,0.5)] px-4 py-3 backdrop-blur-sm">
-          <label
-            onDragOver={e => { e.preventDefault(); setDrag(true); }}
-            onDragLeave={() => setDrag(false)}
-            onDrop={e => { e.preventDefault(); setDrag(false); upload(e.dataTransfer.files?.[0]); }}
-            className={`group relative flex cursor-pointer items-center gap-3 overflow-hidden rounded-2xl border transition-all duration-300 ${drag ? "border-[#00d4aa]/70 bg-[#00d4aa]/10 scale-[1.01]" : "border-white/[0.08] bg-white/[0.03] hover:border-[#00d4aa]/40 hover:bg-[#00d4aa]/05"}`}
-          >
-            {/* animated gradient on hover */}
-            <div className="pointer-events-none absolute inset-0 opacity-0 bg-gradient-to-r from-[#00d4aa]/5 via-transparent to-[#3b82f6]/5 transition-opacity group-hover:opacity-100" />
-
-            <div className="relative flex flex-1 items-center gap-3 px-4 py-3">
-              {uploading ? (
-                <><Spinner /><span className="text-sm font-semibold text-white">Reading PDF…</span></>
-              ) : (
-                <>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5 shrink-0 text-[#415570]">
-                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-                    <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-                  </svg>
-                  <div>
-                    <span className="text-sm font-semibold text-[#8ca3be] group-hover:text-white transition">
-                      {session.document ? `Replace: ${session.document.name}` : "Upload PDF"}
-                    </span>
-                    <span className="ml-2 text-xs text-[#415570]">Drop here or click · max 8MB</span>
+          {session.document && !uploading ? (
+            <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-3 sm:p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[#00d4aa]"><I.file /></span>
+                    <span className="truncate text-sm font-semibold text-white">{session.document.name}</span>
                   </div>
-                </>
-              )}
-            </div>
-            {session.document && !uploading && (
-              <div className="mr-4 flex items-center gap-1.5 rounded-full bg-[#00d4aa]/10 px-2.5 py-1 text-[11px] font-bold text-[#00d4aa]">
-                <div className="h-1.5 w-1.5 rounded-full bg-[#00d4aa]" />Loaded
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span className="rounded-full bg-[#00d4aa]/10 px-2.5 py-0.5 text-[11px] font-bold text-[#00d4aa]">
+                      {session.document.pages} pages
+                    </span>
+                    {session.document.sizeBytes != null && (
+                      <span className="rounded-full bg-white/[0.05] px-2.5 py-0.5 text-[11px] font-medium text-[#8ca3be]">
+                        {formatBytes(session.document.sizeBytes)}
+                      </span>
+                    )}
+                    {(session.document.charCount ?? session.document.text.length) > 0 && (
+                      <span className="rounded-full bg-white/[0.05] px-2.5 py-0.5 text-[11px] font-medium text-[#8ca3be]">
+                        {formatChars(session.document.charCount ?? session.document.text.length)}
+                      </span>
+                    )}
+                  </div>
+                  {session.document.preview && (
+                    <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-[#415570]">
+                      Preview: {session.document.preview}…
+                    </p>
+                  )}
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <label className="cursor-pointer rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-semibold text-[#8ca3be] transition hover:border-[#00d4aa]/40 hover:text-[#00d4aa]">
+                    Replace
+                    <input
+                      ref={fileRef}
+                      type="file"
+                      accept="application/pdf"
+                      className="hidden"
+                      disabled={asking}
+                      onChange={(e) => upload(e.target.files?.[0])}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={removeDocument}
+                    className="rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-semibold text-[#8ca3be] transition hover:border-red-400/40 hover:text-red-400"
+                  >
+                    Remove
+                  </button>
+                </div>
               </div>
-            )}
-            <input ref={fileRef} type="file" accept="application/pdf" className="hidden" disabled={uploading||asking} onChange={e => upload(e.target.files?.[0])} />
-          </label>
+            </div>
+          ) : (
+            <label
+              onDragOver={e => { e.preventDefault(); setDrag(true); }}
+              onDragLeave={() => setDrag(false)}
+              onDrop={e => { e.preventDefault(); setDrag(false); upload(e.dataTransfer.files?.[0]); }}
+              className={`group relative flex cursor-pointer items-center gap-3 overflow-hidden rounded-2xl border transition-all duration-300 ${drag ? "border-[#00d4aa]/70 bg-[#00d4aa]/10 scale-[1.01]" : "border-white/[0.08] bg-white/[0.03] hover:border-[#00d4aa]/40 hover:bg-[#00d4aa]/05"}`}
+            >
+              <div className="pointer-events-none absolute inset-0 opacity-0 bg-gradient-to-r from-[#00d4aa]/5 via-transparent to-[#3b82f6]/5 transition-opacity group-hover:opacity-100" />
+              <div className="relative flex flex-1 items-center gap-3 px-4 py-3">
+                {uploading ? (
+                  <><Spinner /><span className="text-sm font-semibold text-white">Reading PDF…</span></>
+                ) : (
+                  <>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-5 w-5 shrink-0 text-[#415570]">
+                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                      <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <div>
+                      <span className="text-sm font-semibold text-[#8ca3be] group-hover:text-white transition">Upload PDF</span>
+                      <span className="ml-2 text-xs text-[#415570]">Drop here or click · max 8MB</span>
+                    </div>
+                  </>
+                )}
+              </div>
+              <input ref={fileRef} type="file" accept="application/pdf" className="hidden" disabled={uploading||asking} onChange={e => upload(e.target.files?.[0])} />
+            </label>
+          )}
 
           {error && (
             <div className="mt-2 flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">

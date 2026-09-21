@@ -37,10 +37,15 @@ export async function POST(request: Request) {
       );
     }
 
+    const clipped = cleaned.slice(0, 120000);
+
     return NextResponse.json({
       name: file.name,
       pages: totalPages,
-      text: cleaned.slice(0, 120000),
+      sizeBytes: file.size,
+      charCount: clipped.length,
+      preview: clipped.slice(0, 220),
+      text: clipped,
     });
   } catch (error) {
     console.error("extract error", error);

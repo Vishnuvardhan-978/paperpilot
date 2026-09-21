@@ -8,6 +8,9 @@ export type DocumentMeta = {
   name: string;
   pages: number;
   text: string;
+  sizeBytes?: number;
+  charCount?: number;
+  preview?: string;
 };
 
 export type ChatSession = {
