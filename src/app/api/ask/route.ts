@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getGeminiModel } from "@/lib/gemini";
+import { generateWithFallback } from "@/lib/gemini";
 
 export const runtime = "nodejs";
 
@@ -27,7 +27,6 @@ export async function POST(request: Request) {
       );
     }
 
-    const model = getGeminiModel();
     const prompt = `You are PaperPilot, an assistant that answers questions using only the provided document.
 
 Rules:
@@ -46,33 +45,34 @@ ${documentText.slice(0, 100000)}
 
 User question: ${question}`;
 
-    const result = await model.generateContent(prompt);
-    const answer = result.response.text().trim();
-
-    if (!answer) {
-      return NextResponse.json(
-        { error: "No answer returned. Try again." },
-        { status: 502 },
-      );
-    }
+    const answer = await generateWithFallback(prompt);
 
     return NextResponse.json({ answer });
   } catch (error) {
     console.error("ask error", error);
 
     let message = "Gemini request failed. Try again.";
+    let status = 500;
+
     if (error instanceof Error) {
       if (error.message.includes("GEMINI_API_KEY")) {
         message = error.message;
       } else if (error.message.includes("[401]") || error.message.includes("API key")) {
-        message = "Invalid Gemini API key. Create a new key and update .env.local";
+        message = "Invalid Gemini API key. Update GEMINI_API_KEY in Vercel settings.";
       } else if (error.message.includes("[404]")) {
-        message = "Gemini model not found. Update the model name in src/lib/gemini.ts";
+        message = "Gemini model not found. Please try again shortly.";
+      } else if (
+        error.message.includes("[503]") ||
+        error.message.includes("[429]") ||
+        error.message.toLowerCase().includes("high demand")
+      ) {
+        message = "AI is busy right now. Please wait a few seconds and try again.";
+        status = 503;
       } else {
         message = error.message.slice(0, 240);
       }
     }
 
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: message }, { status });
   }
 }
