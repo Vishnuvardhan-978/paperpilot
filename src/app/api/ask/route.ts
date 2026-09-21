@@ -6,6 +6,7 @@ type AskBody = {
   question?: string;
   documentText?: string;
   documentName?: string;
+  compareMode?: boolean;
 };
 
 export async function POST(request: Request) {
@@ -14,6 +15,7 @@ export async function POST(request: Request) {
     const question = body.question?.trim();
     const documentText = body.documentText?.trim();
     const documentName = body.documentName?.trim() || "document.pdf";
+    const compareMode = Boolean(body.compareMode);
 
     if (!question) {
       return Response.json({ error: "Question is required." }, { status: 400 });
@@ -26,7 +28,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const prompt = buildAskPrompt(question, documentText, documentName);
+    const prompt = buildAskPrompt(question, documentText, documentName, compareMode);
     const encoder = new TextEncoder();
 
     const stream = new ReadableStream({

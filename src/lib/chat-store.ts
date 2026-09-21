@@ -21,6 +21,7 @@ export type ChatSession = {
   title: string;
   createdAt: number;
   updatedAt: number;
+  pinned?: boolean;
   /** @deprecated use documents */
   document?: DocumentMeta | null;
   documents: DocumentMeta[];
@@ -100,7 +101,13 @@ export async function listChats(): Promise<ChatSession[]> {
   const store = tx.objectStore(STORE);
   const chats = await requestToPromise(store.getAll() as IDBRequest<ChatSession[]>);
   db.close();
-  return chats.map(normalizeSession).sort((a, b) => b.updatedAt - a.updatedAt);
+  return chats
+    .map(normalizeSession)
+    .sort((a, b) => {
+      const pin = Number(!!b.pinned) - Number(!!a.pinned);
+      if (pin !== 0) return pin;
+      return b.updatedAt - a.updatedAt;
+    });
 }
 
 export async function getChat(id: string): Promise<ChatSession | null> {

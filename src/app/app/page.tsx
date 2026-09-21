@@ -36,12 +36,21 @@ import {
   formatChars,
   shareChatText,
 } from "@/lib/export";
+import { splitAnswerAndCitations } from "@/lib/citations";
+import { canAsk, getAskUsage, recordAsk } from "@/lib/rate-limit";
 
 const CHIPS = [
   "Summarize this document",
   "What are the key points?",
   "List all important dates",
   "Who are the people mentioned?",
+];
+
+const COMPARE_CHIPS = [
+  "Compare these documents side by side",
+  "What is the same and what is different?",
+  "List conflicting numbers, dates, or names",
+  "Which document is more complete?",
 ];
 
 const I = {
@@ -58,6 +67,10 @@ const I = {
   eye: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-4 w-4"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
   share: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-3.5 w-3.5"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>,
   refresh: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-3.5 w-3.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>,
+  stop: () => <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>,
+  edit: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-3.5 w-3.5"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>,
+  pin: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-3.5 w-3.5"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 01-1.11 1.79l-1.78.9A2 2 0 004.89 15H19.1a2 2 0 001.78-2.55l-1.78-.9A2 2 0 0118 10.76V6a2 2 0 00-2-2H8a2 2 0 00-2 2v4.76z"/></svg>,
+  search: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="h-3.5 w-3.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
 };
 
 function Spinner({ size = "h-4 w-4" }: { size?: string }) {
@@ -99,13 +112,31 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [drag, setDrag] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(true);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [previewDocId, setPreviewDocId] = useState<string | null>(null);
   const [showOnboard, setShowOnboard] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [chatSearch, setChatSearch] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [askUsage, setAskUsage] = useState({ used: 0, limit: 40, remaining: 40 });
+  const [compareMode, setCompareMode] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const [, tx] = useTransition();
 
   const docs = useMemo(() => getDocuments(session), [session]);
   const previewDoc = docs.find((d) => d.id === previewDocId) ?? docs[0] ?? null;
+  const filteredSessions = useMemo(() => {
+    const q = chatSearch.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((chat) => {
+      const inTitle = chat.title.toLowerCase().includes(q);
+      const inDocs = getDocuments(chat).some((d) => d.name.toLowerCase().includes(q));
+      const inMsgs = chat.messages.some((m) => m.content.toLowerCase().includes(q));
+      return inTitle || inDocs || inMsgs;
+    });
+  }, [sessions, chatSearch]);
 
   const previewUrl = useMemo(() => {
     if (!previewDoc?.pdfBytes) return null;
@@ -118,19 +149,6 @@ export default function App() {
       return null;
     }
   }, [previewDoc]);
-
-  function togglePreview() {
-    if (!docs.length) return;
-    if (!previewOpen) {
-      if (!previewDoc?.pdfBytes) {
-        setError("PDF preview needs a fresh upload. Remove and re-add the file, then try Show PDF.");
-        return;
-      }
-      setPreviewOpen(true);
-      return;
-    }
-    setPreviewOpen(false);
-  }
 
   function openAttachPicker() {
     if (docs.length >= MAX_DOCS) {
@@ -169,6 +187,7 @@ export default function App() {
       .catch(() => {})
       .finally(() => {
         setReady(true);
+        setAskUsage(getAskUsage());
         if (!hasSeenOnboarding()) setShowOnboard(true);
       });
   }, [refresh]);
@@ -189,9 +208,9 @@ export default function App() {
         e.preventDefault();
         setExportOpen(true);
       }
-      if (meta && e.key.toLowerCase() === "p" && docs.length) {
+      if (meta && e.key.toLowerCase() === "p" && docs.length && previewOpen) {
         e.preventDefault();
-        togglePreview();
+        setPreviewOpen(false);
       }
       if (e.key === "Escape") {
         setExportOpen(false);
@@ -205,14 +224,24 @@ export default function App() {
   }, [session.messages.length, docs.length]);
 
   async function save(next: ChatSession) {
-    const s = { ...next, updatedAt: Date.now(), documents: getDocuments(next), document: null };
+    const s = {
+      ...next,
+      updatedAt: Date.now(),
+      documents: getDocuments(next),
+      document: null,
+      pinned: next.pinned ?? session.pinned,
+    };
     setSession(s);
     setActiveId(s.id);
     setActiveChatId(s.id);
     await saveChat(s);
     tx(() =>
       setSessions((p) =>
-        [s, ...p.filter((c) => c.id !== s.id)].sort((a, b) => b.updatedAt - a.updatedAt),
+        [s, ...p.filter((c) => c.id !== s.id)].sort((a, b) => {
+          const pin = Number(!!b.pinned) - Number(!!a.pinned);
+          if (pin !== 0) return pin;
+          return b.updatedAt - a.updatedAt;
+        }),
       ),
     );
   }
@@ -299,8 +328,8 @@ export default function App() {
         ],
       });
       setPreviewDocId(doc.id);
-      setPreviewOpen(true);
       setError(null);
+      if (nextDocs.length >= 2) setCompareMode(true);
       setTimeout(() => inputRef.current?.focus(), 100);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
@@ -311,37 +340,57 @@ export default function App() {
     }
   }
 
-  async function ask(raw: string) {
+  async function ask(raw: string, replaceFromUserId?: string) {
     const currentDocs = getDocuments(session);
     if (!currentDocs.length || !raw.trim() || asking) return;
 
+    const quota = canAsk();
+    if (!quota.ok) {
+      setError(`Daily demo limit reached (${quota.limit} asks). Try again tomorrow.`);
+      return;
+    }
+
     const question = raw.trim();
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    let baseMessages = session.messages;
+    if (replaceFromUserId) {
+      const idx = baseMessages.findIndex((m) => m.id === replaceFromUserId);
+      if (idx >= 0) baseMessages = baseMessages.slice(0, idx);
+    }
+
     const um: Message = { id: crypto.randomUUID(), role: "user", content: question };
     const assistantId = crypto.randomUUID();
     const next: ChatSession = {
       ...session,
       documents: currentDocs,
       messages: [
-        ...session.messages,
+        ...baseMessages,
         um,
         { id: assistantId, role: "assistant", content: "" },
       ],
     };
 
     setQ("");
+    setEditingId(null);
     setAsking(true);
     setError(null);
     setLastQuestion(question);
     await save(next);
+    setAskUsage(recordAsk());
 
     try {
       const r = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           question,
           documentText: combinedDocumentText(currentDocs),
           documentName: documentNames(currentDocs),
+          compareMode: compareMode && currentDocs.length >= 2,
         }),
       });
 
@@ -393,17 +442,95 @@ export default function App() {
       });
       setLastQuestion(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-      // remove empty assistant bubble
-      await save({
-        ...session,
-        documents: currentDocs,
-        messages: [...session.messages, um],
-      });
+      if (e instanceof DOMException && e.name === "AbortError") {
+        const current = getDocuments(session);
+        setSession((prev) => {
+          const msgs = [...prev.messages];
+          const last = msgs[msgs.length - 1];
+          if (last?.role === "assistant" && last.content.trim()) {
+            msgs[msgs.length - 1] = {
+              ...last,
+              content: `${last.content.trim()}\n\n_(Stopped)_`,
+            };
+          } else if (last?.role === "assistant") {
+            msgs.pop();
+          }
+          const stopped = { ...prev, documents: current, messages: msgs };
+          void saveChat(stopped);
+          return stopped;
+        });
+      } else {
+        setError(e instanceof Error ? e.message : "Failed");
+        await save({
+          ...session,
+          documents: currentDocs,
+          messages: [...baseMessages, um],
+        });
+      }
     } finally {
       setAsking(false);
+      abortRef.current = null;
       setTimeout(() => inputRef.current?.focus(), 80);
     }
+  }
+
+  function stopGenerating() {
+    abortRef.current?.abort();
+  }
+
+  function startEdit(msg: Message) {
+    if (asking) return;
+    setEditingId(msg.id);
+    setEditDraft(msg.content);
+  }
+
+  async function submitEdit() {
+    if (!editingId || !editDraft.trim()) return;
+    const id = editingId;
+    setEditingId(null);
+    await ask(editDraft, id);
+  }
+
+  async function togglePin(chat: ChatSession) {
+    const next = { ...chat, pinned: !chat.pinned };
+    await saveChat(next);
+    if (chat.id === activeId) setSession(next);
+    setSessions((prev) =>
+      [...prev.map((c) => (c.id === chat.id ? next : c))].sort((a, b) => {
+        const pin = Number(!!b.pinned) - Number(!!a.pinned);
+        if (pin !== 0) return pin;
+        return b.updatedAt - a.updatedAt;
+      }),
+    );
+  }
+
+  function startRename(chat: ChatSession) {
+    setRenamingId(chat.id);
+    setRenameDraft(chat.title);
+  }
+
+  async function submitRename() {
+    if (!renamingId || !renameDraft.trim()) {
+      setRenamingId(null);
+      return;
+    }
+    const chat = sessions.find((c) => c.id === renamingId);
+    if (!chat) return;
+    const next = { ...chat, title: renameDraft.trim().slice(0, 60) };
+    await saveChat(next);
+    if (chat.id === activeId) setSession(next);
+    setSessions((prev) => prev.map((c) => (c.id === chat.id ? next : c)));
+    setRenamingId(null);
+  }
+
+  function viewAttachment(docId: string) {
+    const doc = docs.find((d) => d.id === docId);
+    if (!doc?.pdfBytes) {
+      setError("PDF preview needs a fresh upload for this file. Re-add it, then tap View.");
+      return;
+    }
+    setPreviewDocId(docId);
+    setPreviewOpen(true);
   }
 
   async function clearMessages() {
@@ -429,11 +556,13 @@ export default function App() {
       ...session,
       title: nextDocs[0] ? titleFromDocument(nextDocs[0].name) : "New chat",
       documents: nextDocs,
-      messages: nextDocs.length
-        ? session.messages
-        : [],
+      messages: nextDocs.length ? session.messages : [],
     });
-    setPreviewDocId(nextDocs[0]?.id ?? null);
+    if (previewDocId === id) {
+      setPreviewDocId(nextDocs[0]?.id ?? null);
+      if (!nextDocs.length) setPreviewOpen(false);
+    }
+    if (nextDocs.length < 2) setCompareMode(false);
     if (!nextDocs.length) setError(null);
   }
 
@@ -503,28 +632,75 @@ export default function App() {
             </button>
           </div>
           <div className="px-5 pb-2"><span className="text-[10px] font-semibold uppercase tracking-widest text-[#415570]">Recents</span></div>
+          <div className="px-3 pb-2">
+            <div className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2">
+              <span className="text-[#415570]"><I.search /></span>
+              <input
+                value={chatSearch}
+                onChange={(e) => setChatSearch(e.target.value)}
+                placeholder="Search chats…"
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-white outline-none placeholder:text-[#415570]"
+              />
+            </div>
+          </div>
           <div className="scroll-y flex-1 space-y-0.5 px-3 pb-3">
-            {sessions.length === 0 ? (
-              <p className="px-3 py-6 text-center text-xs text-[#415570]">No chats yet.</p>
+            {filteredSessions.length === 0 ? (
+              <p className="px-3 py-6 text-center text-xs text-[#415570]">
+                {chatSearch ? "No chats match your search." : "No chats yet."}
+              </p>
             ) : (
-              sessions.map((chat) => {
+              filteredSessions.map((chat) => {
                 const active = chat.id === activeId;
                 const count = getDocuments(chat).length;
                 return (
-                  <div key={chat.id} onClick={() => openChat(chat.id)} className={`group relative flex cursor-pointer items-start gap-2.5 rounded-xl px-3 py-2.5 transition ${active ? "border border-[#00d4aa]/20 bg-gradient-to-r from-[#00d4aa]/15 to-[#3b82f6]/10" : "border border-transparent hover:bg-white/[0.04]"}`}>
-                    <span className={`mt-0.5 shrink-0 ${active ? "text-[#00d4aa]" : "text-[#415570]"}`}><I.file /></span>
-                    <div className="min-w-0 flex-1">
-                      <div className={`truncate text-[13px] font-medium ${active ? "text-white" : "text-[#8ca3be]"}`}>{chat.title}</div>
-                      <div className="mt-0.5 text-[11px] text-[#415570]">{count} PDF · {chat.messages.length} msg</div>
+                  <div
+                    key={chat.id}
+                    className={`group relative rounded-xl px-3 py-2.5 transition ${
+                      active
+                        ? "border border-[#00d4aa]/20 bg-gradient-to-r from-[#00d4aa]/15 to-[#3b82f6]/10"
+                        : "border border-transparent hover:bg-white/[0.04]"
+                    }`}
+                  >
+                    {renamingId === chat.id ? (
+                      <form
+                        onSubmit={(e) => { e.preventDefault(); void submitRename(); }}
+                        className="flex items-center gap-1"
+                      >
+                        <input
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onBlur={() => void submitRename()}
+                          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[13px] text-white outline-none"
+                        />
+                      </form>
+                    ) : (
+                      <button type="button" onClick={() => openChat(chat.id)} className="flex w-full items-start gap-2.5 text-left">
+                        <span className={`mt-0.5 shrink-0 ${active ? "text-[#00d4aa]" : "text-[#415570]"}`}>
+                          {chat.pinned ? <I.pin /> : <I.file />}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className={`truncate text-[13px] font-medium ${active ? "text-white" : "text-[#8ca3be]"}`}>
+                            {chat.title}
+                          </div>
+                          <div className="mt-0.5 text-[11px] text-[#415570]">{count} PDF · {chat.messages.length} msg</div>
+                        </div>
+                      </button>
+                    )}
+                    <div className="mt-1.5 flex items-center gap-1 opacity-100 lg:opacity-0 lg:group-hover:opacity-100">
+                      <button type="button" onClick={() => togglePin(chat)} className="rounded px-1.5 py-0.5 text-[10px] text-[#415570] hover:text-[#00d4aa]">
+                        {chat.pinned ? "Unpin" : "Pin"}
+                      </button>
+                      <button type="button" onClick={() => startRename(chat)} className="rounded px-1.5 py-0.5 text-[10px] text-[#415570] hover:text-[#8ca3be]">Rename</button>
+                      <button type="button" onClick={() => delChat(chat.id)} className="rounded px-1.5 py-0.5 text-[10px] text-[#415570] hover:text-[#f87171]">Delete</button>
                     </div>
-                    <button type="button" onClick={(e) => { e.stopPropagation(); delChat(chat.id); }} className="absolute right-2 top-3 flex h-5 w-5 items-center justify-center rounded opacity-0 text-[#415570] hover:text-[#f87171] group-hover:opacity-100"><I.trash /></button>
                   </div>
                 );
               })
             )}
           </div>
           <div className="border-t border-white/[0.06] px-5 py-4 text-center text-[11px] text-[#415570]">
-            Shortcuts: Ctrl+N · Ctrl+E · Ctrl+P
+            Demo asks today: {askUsage.used}/{askUsage.limit}
           </div>
         </div>
       </aside>
@@ -534,12 +710,14 @@ export default function App() {
         <header className="relative z-50 flex h-14 shrink-0 items-center gap-3 border-b border-white/[0.06] bg-[rgba(6,9,26,0.95)] px-4 backdrop-blur-xl">
           <button type="button" onClick={() => setNavOpen(true)} className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] text-[#415570] lg:hidden"><I.menu /></button>
           <div className="min-w-0 flex-1 truncate text-sm font-semibold text-white/90">
-            {docs.length ? `${docs.length} document${docs.length > 1 ? "s" : ""} loaded` : "No documents"}
+            {docs.length
+              ? `${docs.length} document${docs.length > 1 ? "s" : ""} loaded${compareMode && docs.length >= 2 ? " · Compare ON" : ""}`
+              : "No documents"}
           </div>
           <div className="relative z-50 flex items-center gap-2">
-            {docs.length > 0 && (
-              <button type="button" onClick={togglePreview} className="flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] hover:text-[#00d4aa]" title="Ctrl+P">
-                <I.eye /><span className="hidden sm:inline">{previewOpen ? "Hide PDF" : "Show PDF"}</span>
+            {docs.length > 0 && previewOpen && (
+              <button type="button" onClick={() => setPreviewOpen(false)} className="flex items-center gap-1.5 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-[13px] font-semibold text-[#8ca3be] hover:text-[#00d4aa]" title="Ctrl+P">
+                <I.eye /><span className="hidden sm:inline">Hide PDF</span>
               </button>
             )}
             {session.messages.length > 0 && (
@@ -578,8 +756,15 @@ export default function App() {
               {docs.length > 0 && !uploading ? (
                 <div className="space-y-2">
                   {docs.map((doc) => (
-                    <div key={doc.id} className={`flex items-start justify-between gap-3 rounded-2xl border px-3 py-2.5 ${previewDocId === doc.id ? "border-[#00d4aa]/30 bg-[#00d4aa]/5" : "border-white/[0.08] bg-white/[0.03]"}`}>
-                      <button type="button" className="min-w-0 flex-1 text-left" onClick={() => { setPreviewDocId(doc.id); setPreviewOpen(true); }}>
+                    <div
+                      key={doc.id}
+                      className={`flex items-center gap-3 rounded-2xl border px-3 py-2.5 ${
+                        previewOpen && previewDocId === doc.id
+                          ? "border-[#00d4aa]/30 bg-[#00d4aa]/5"
+                          : "border-white/[0.08] bg-white/[0.03]"
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <span className="text-[#00d4aa]"><I.file /></span>
                           <span className="truncate text-sm font-semibold text-white">{doc.name}</span>
@@ -589,8 +774,23 @@ export default function App() {
                           {doc.sizeBytes != null && <span className="rounded-full bg-white/[0.05] px-2 py-0.5 text-[10px] text-[#8ca3be]">{formatBytes(doc.sizeBytes)}</span>}
                           <span className="rounded-full bg-white/[0.05] px-2 py-0.5 text-[10px] text-[#8ca3be]">{formatChars(doc.charCount ?? doc.text.length)}</span>
                         </div>
-                      </button>
-                      <button type="button" onClick={() => removeDoc(doc.id)} className="rounded-lg border border-white/[0.08] px-2 py-1 text-[11px] text-[#8ca3be] hover:text-red-400">Remove</button>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => viewAttachment(doc.id)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[11px] font-semibold text-[#8ca3be] hover:border-[#00d4aa]/40 hover:text-[#00d4aa]"
+                        >
+                          <I.eye /> View
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeDoc(doc.id)}
+                          className="rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-[11px] font-semibold text-[#8ca3be] hover:text-red-400"
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </div>
                   ))}
                   {docs.length < MAX_DOCS && (
@@ -598,6 +798,27 @@ export default function App() {
                       <I.plus /> Add another PDF ({docs.length}/{MAX_DOCS})
                       <input ref={fileRef} type="file" accept="application/pdf" className="hidden" disabled={asking} onChange={(e) => upload(e.target.files?.[0])} />
                     </label>
+                  )}
+                  {docs.length >= 2 && (
+                    <div className="flex items-center justify-between gap-3 rounded-xl border border-[#3b82f6]/25 bg-[#3b82f6]/10 px-3 py-2.5">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-white">Compare mode</div>
+                        <div className="text-[11px] text-[#8ca3be]">
+                          AI will contrast {docs.length} documents by name
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setCompareMode((v) => !v)}
+                        className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-bold transition ${
+                          compareMode
+                            ? "bg-[#3b82f6] text-white"
+                            : "border border-white/15 bg-white/[0.04] text-[#8ca3be]"
+                        }`}
+                      >
+                        {compareMode ? "ON" : "OFF"}
+                      </button>
+                    </div>
                   )}
                 </div>
               ) : (
@@ -633,29 +854,58 @@ export default function App() {
               {session.messages.length === 0 ? (
                 <div className="animate-fade flex h-full min-h-[40vh] flex-col items-center justify-center text-center">
                   <h2 className="font-[family-name:var(--font-display)] text-3xl font-semibold text-shimmer sm:text-4xl">Ask your documents</h2>
-                  <p className="mt-3 max-w-sm text-sm text-[#415570]">Upload up to {MAX_DOCS} PDFs, preview them, and chat with streaming answers.</p>
+                  <p className="mt-3 max-w-sm text-sm text-[#415570]">
+                    Upload a PDF above or tap <strong className="text-[#8ca3be]">+</strong> in the chat box. Use <strong className="text-[#8ca3be]">View</strong> next to each file to preview.
+                  </p>
                   <div className="mt-5 flex flex-wrap justify-center gap-2 text-[11px] text-[#415570]">
                     <kbd className="rounded border border-white/10 px-2 py-1">Ctrl+N</kbd> new
                     <kbd className="rounded border border-white/10 px-2 py-1">Ctrl+E</kbd> export
-                    <kbd className="rounded border border-white/10 px-2 py-1">Ctrl+P</kbd> preview
                   </div>
                 </div>
               ) : (
                 <div className="mx-auto max-w-2xl space-y-6">
-                  {session.messages.map((m, i) => (
-                    <Bubble key={m.id} msg={m} idx={i} streaming={asking && i === session.messages.length - 1 && m.role === "assistant"} />
-                  ))}
+                  {session.messages.map((m, i) => {
+                    const isLastUser =
+                      m.role === "user" &&
+                      !session.messages.slice(i + 1).some((x) => x.role === "user");
+                    return (
+                      <Bubble
+                        key={m.id}
+                        msg={m}
+                        idx={i}
+                        streaming={asking && i === session.messages.length - 1 && m.role === "assistant"}
+                        canEdit={isLastUser && !asking}
+                        editing={editingId === m.id}
+                        editDraft={editDraft}
+                        onEditDraft={setEditDraft}
+                        onStartEdit={() => startEdit(m)}
+                        onCancelEdit={() => setEditingId(null)}
+                        onSubmitEdit={submitEdit}
+                      />
+                    );
+                  })}
                   {asking && session.messages[session.messages.length - 1]?.content === "" && <ThinkingBubble />}
                   <div ref={endRef} />
                 </div>
               )}
             </div>
 
-            {docs.length > 0 && !asking && session.messages.length <= 2 && (
+            {docs.length > 0 && !asking && session.messages.length <= 3 && (
               <div className="shrink-0 border-t border-white/[0.06] px-4 py-2.5 sm:px-6">
                 <div className="mx-auto flex max-w-2xl flex-wrap gap-2">
-                  {CHIPS.map((c) => (
-                    <button key={c} type="button" onClick={() => ask(c)} className="rounded-full border border-white/[0.08] bg-white/[0.04] px-3.5 py-1.5 text-xs font-medium text-[#8ca3be] hover:text-[#00d4aa]">{c}</button>
+                  {(compareMode && docs.length >= 2 ? COMPARE_CHIPS : CHIPS).map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => ask(c)}
+                      className={`rounded-full border px-3.5 py-1.5 text-xs font-medium transition ${
+                        compareMode && docs.length >= 2
+                          ? "border-[#3b82f6]/30 bg-[#3b82f6]/10 text-[#93c5fd] hover:border-[#3b82f6]/60"
+                          : "border-white/[0.08] bg-white/[0.04] text-[#8ca3be] hover:text-[#00d4aa]"
+                      }`}
+                    >
+                      {c}
+                    </button>
                   ))}
                 </div>
               </div>
@@ -695,12 +945,24 @@ export default function App() {
                       }
                     }}
                     disabled={!docs.length || asking}
-                    placeholder={docs.length ? "Ask anything… (Enter to send)" : "Tap + to upload a PDF"}
+                    placeholder={
+                      !docs.length
+                        ? "Tap + to upload a PDF"
+                        : compareMode && docs.length >= 2
+                          ? "Ask a compare question… (Enter to send)"
+                          : "Ask anything… (Enter to send)"
+                    }
                     className="min-w-0 flex-1 bg-transparent py-3.5 text-sm text-white outline-none placeholder:text-[#415570] disabled:opacity-40"
                   />
                 </div>
-                <button type="submit" disabled={!docs.length || asking || !q.trim()} className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#00d4aa] to-[#0ea5e9] text-white shadow-[0_0_20px_rgba(0,212,170,0.3)] disabled:opacity-30">
-                  {asking ? <Spinner /> : <I.send />}
+                <button
+                  type={asking ? "button" : "submit"}
+                  onClick={asking ? stopGenerating : undefined}
+                  disabled={!asking && (!docs.length || !q.trim())}
+                  title={asking ? "Stop generating" : "Send"}
+                  className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-[#00d4aa] to-[#0ea5e9] text-white shadow-[0_0_20px_rgba(0,212,170,0.3)] disabled:opacity-30"
+                >
+                  {asking ? <I.stop /> : <I.send />}
                 </button>
               </form>
             </div>
@@ -746,9 +1008,9 @@ export default function App() {
             <h3 className="font-[family-name:var(--font-display)] text-2xl font-semibold text-white">Welcome to PaperPilot</h3>
             <ul className="mt-4 space-y-2 text-sm text-[#8ca3be]">
               <li>1. Upload up to <strong className="text-white">{MAX_DOCS} PDFs</strong></li>
-              <li>2. Preview on the right · chat on the left</li>
-              <li>3. Answers stream live · export anytime</li>
-              <li>4. Shortcuts: <kbd className="rounded border border-white/10 px-1">Ctrl+N</kbd> <kbd className="rounded border border-white/10 px-1">Ctrl+E</kbd> <kbd className="rounded border border-white/10 px-1">Ctrl+P</kbd></li>
+              <li>2. Tap <strong className="text-white">View</strong> beside a file to preview</li>
+              <li>3. Answers stream live with <strong className="text-white">source quotes</strong></li>
+              <li>4. Edit a question · stop generation anytime</li>
             </ul>
             <button type="button" onClick={dismissOnboard} className="mt-6 w-full rounded-xl bg-gradient-to-r from-[#00d4aa] to-[#0ea5e9] py-3 text-sm font-semibold text-white">
               Got it — start asking
@@ -760,37 +1022,107 @@ export default function App() {
   );
 }
 
-function Bubble({ msg, idx, streaming }: { msg: Message; idx: number; streaming?: boolean }) {
+function Bubble({
+  msg,
+  idx,
+  streaming,
+  canEdit,
+  editing,
+  editDraft,
+  onEditDraft,
+  onStartEdit,
+  onCancelEdit,
+  onSubmitEdit,
+}: {
+  msg: Message;
+  idx: number;
+  streaming?: boolean;
+  canEdit?: boolean;
+  editing?: boolean;
+  editDraft?: string;
+  onEditDraft?: (v: string) => void;
+  onStartEdit?: () => void;
+  onCancelEdit?: () => void;
+  onSubmitEdit?: () => void;
+}) {
   const user = msg.role === "user";
   if (user) {
     return (
       <div className="animate-rise flex justify-end" style={{ animationDelay: `${Math.min(idx * 0.04, 0.2)}s` }}>
-        <div className="max-w-[78%] rounded-2xl rounded-tr-sm bg-gradient-to-br from-[#1c3148] to-[#0f1e33] px-4 py-3 text-sm text-white/90 ring-1 ring-white/[0.07]">
-          {msg.content}
+        <div className="group max-w-[85%] sm:max-w-[78%]">
+          {editing ? (
+            <div className="rounded-2xl border border-[#00d4aa]/40 bg-[#0f1e33] p-3">
+              <textarea
+                value={editDraft}
+                onChange={(e) => onEditDraft?.(e.target.value)}
+                rows={3}
+                className="w-full resize-none rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-white outline-none"
+              />
+              <div className="mt-2 flex justify-end gap-2">
+                <button type="button" onClick={onCancelEdit} className="rounded-lg px-3 py-1.5 text-xs text-[#8ca3be]">Cancel</button>
+                <button type="button" onClick={onSubmitEdit} className="rounded-lg bg-[#00d4aa] px-3 py-1.5 text-xs font-semibold text-[#06091a]">Resend</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="rounded-2xl rounded-tr-sm bg-gradient-to-br from-[#1c3148] to-[#0f1e33] px-4 py-3 text-sm text-white/90 ring-1 ring-white/[0.07]">
+                {msg.content}
+              </div>
+              {canEdit && (
+                <div className="mt-1 flex justify-end opacity-0 transition-opacity group-hover:opacity-100">
+                  <button type="button" onClick={onStartEdit} className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[#415570] hover:text-[#8ca3be]">
+                    <I.edit /> Edit & resend
+                  </button>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </div>
     );
   }
+
   if (!msg.content && !streaming) return null;
+  const { body, citations } = streaming
+    ? { body: msg.content || "", citations: [] as ReturnType<typeof splitAnswerAndCitations>["citations"] }
+    : splitAnswerAndCitations(msg.content || "");
+  const showCitations = !streaming && citations.length > 0 && !(citations.length === 1 && citations[0].document.toLowerCase() === "none");
+
   return (
     <div className="animate-rise flex items-start gap-3" style={{ animationDelay: `${Math.min(idx * 0.04, 0.2)}s` }}>
       <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#00d4aa] to-[#3b82f6] text-[10px] font-black text-white">PP</div>
       <div className="group min-w-0 flex-1">
         <div className="rounded-2xl rounded-tl-sm border border-white/[0.08] bg-[rgba(16,24,40,0.8)] px-4 py-3.5 shadow-lg">
-          {msg.content ? (
-            <div className="prose-ai"><ReactMarkdown>{msg.content}</ReactMarkdown></div>
-          ) : (
-            <div className="flex gap-1.5">
-              <span className="typing-dot h-2 w-2 rounded-full bg-[#00d4aa]" />
-              <span className="typing-dot h-2 w-2 rounded-full bg-[#00d4aa]" />
-              <span className="typing-dot h-2 w-2 rounded-full bg-[#00d4aa]" />
+          {body || streaming ? (
+            <div className="prose-ai">
+              {body ? <ReactMarkdown>{body}</ReactMarkdown> : null}
+              {!body && streaming && (
+                <div className="flex gap-1.5">
+                  <span className="typing-dot h-2 w-2 rounded-full bg-[#00d4aa]" />
+                  <span className="typing-dot h-2 w-2 rounded-full bg-[#00d4aa]" />
+                  <span className="typing-dot h-2 w-2 rounded-full bg-[#00d4aa]" />
+                </div>
+              )}
+            </div>
+          ) : null}
+          {streaming && body && <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-[#00d4aa]" />}
+          {showCitations && (
+            <div className="mt-3 border-t border-white/[0.08] pt-3">
+              <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[#415570]">Sources</div>
+              <div className="space-y-2">
+                {citations.map((c, i) => (
+                  <div key={`${c.document}-${i}`} className="rounded-xl border border-[#00d4aa]/15 bg-[#00d4aa]/5 px-3 py-2">
+                    <div className="text-[11px] font-semibold text-[#00d4aa]">{c.document}</div>
+                    <div className="mt-0.5 text-xs italic text-[#8ca3be]">“{c.quote}”</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
-          {streaming && msg.content && <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-[#00d4aa]" />}
         </div>
-        {msg.content && !streaming && (
+        {body && !streaming && (
           <div className="mt-1 flex gap-2 opacity-0 transition-opacity group-hover:opacity-100">
-            <CopyBtn text={msg.content} label="Copy answer" />
+            <CopyBtn text={body} label="Copy answer" />
           </div>
         )}
       </div>
