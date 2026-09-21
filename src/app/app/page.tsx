@@ -9,6 +9,7 @@ import {
   useState,
   useTransition,
 } from "react";
+import ReactMarkdown from "react-markdown";
 import {
   ChatSession,
   Message,
@@ -25,12 +26,89 @@ import {
 const SUGGESTIONS = [
   "Summarize this document",
   "What are the key points?",
-  "List important names and dates",
+  "List all important dates",
+  "Who are the people mentioned?",
 ];
 
+/* ── tiny icon components ──────────────────────────────── */
+function IconPdf() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5 shrink-0" stroke="currentColor" strokeWidth={1.6}>
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="9" y1="13" x2="15" y2="13" />
+      <line x1="9" y1="17" x2="12" y2="17" />
+    </svg>
+  );
+}
+function IconPlus() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" stroke="currentColor" strokeWidth={2.2}>
+      <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+function IconTrash() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth={2}>
+      <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+function IconCopy({ done }: { done: boolean }) {
+  return done ? (
+    <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5 text-accent" stroke="currentColor" strokeWidth={2.2}>
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 24 24" fill="none" className="h-3.5 w-3.5" stroke="currentColor" strokeWidth={2}>
+      <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+    </svg>
+  );
+}
+function IconUpload() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-8 w-8" stroke="currentColor" strokeWidth={1.5}>
+      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </svg>
+  );
+}
+function IconSend() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" stroke="currentColor" strokeWidth={2.2}>
+      <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </svg>
+  );
+}
+
+/* ── copy button ────────────────────────────────────────── */
+function CopyButton({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(text).then(() => {
+      setDone(true);
+      setTimeout(() => setDone(false), 1800);
+    });
+  }
+  return (
+    <button
+      onClick={copy}
+      title="Copy"
+      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted transition hover:bg-line hover:text-ink"
+    >
+      <IconCopy done={done} />
+      <span className="hidden sm:inline">{done ? "Copied" : "Copy"}</span>
+    </button>
+  );
+}
+
+/* ── main component ─────────────────────────────────────── */
 export default function WorkspacePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [ready, setReady] = useState(false);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -46,7 +124,6 @@ export default function WorkspacePage() {
   const refreshSessions = useCallback(async (preferredId?: string | null) => {
     const chats = await listChats();
     setSessions(chats);
-
     if (chats.length === 0) {
       const fresh = createEmptySession();
       setSession(fresh);
@@ -54,11 +131,8 @@ export default function WorkspacePage() {
       clearActiveChatId();
       return;
     }
-
     const targetId = preferredId ?? getActiveChatId();
-    const selected =
-      chats.find((chat) => chat.id === targetId) ?? chats[0];
-
+    const selected = chats.find((c) => c.id === targetId) ?? chats[0];
     setSession(selected);
     setActiveId(selected.id);
     setActiveChatId(selected.id);
@@ -86,7 +160,7 @@ export default function WorkspacePage() {
     await saveChat(stamped);
     startTransition(() => {
       setSessions((prev) => {
-        const without = prev.filter((item) => item.id !== stamped.id);
+        const without = prev.filter((c) => c.id !== stamped.id);
         return [stamped, ...without].sort((a, b) => b.updatedAt - a.updatedAt);
       });
     });
@@ -98,11 +172,12 @@ export default function WorkspacePage() {
     setQuestion("");
     setSidebarOpen(false);
     await persist(fresh);
+    setTimeout(() => inputRef.current?.focus(), 80);
   }
 
   async function openChat(id: string) {
     const chats = sessions.length ? sessions : await listChats();
-    const found = chats.find((chat) => chat.id === id);
+    const found = chats.find((c) => c.id === id);
     if (!found) return;
     setError(null);
     setQuestion("");
@@ -110,13 +185,13 @@ export default function WorkspacePage() {
     setActiveId(found.id);
     setActiveChatId(found.id);
     setSidebarOpen(false);
+    setTimeout(() => inputRef.current?.focus(), 80);
   }
 
   async function removeChat(id: string) {
     await deleteChat(id);
-    const remaining = sessions.filter((chat) => chat.id !== id);
+    const remaining = sessions.filter((c) => c.id !== id);
     setSessions(remaining);
-
     if (activeId === id) {
       if (remaining[0]) {
         setSession(remaining[0]);
@@ -132,37 +207,25 @@ export default function WorkspacePage() {
     if (!file) return;
     setError(null);
     setUploading(true);
-
     try {
       const formData = new FormData();
       formData.append("file", file);
-
-      const res = await fetch("/api/extract", {
-        method: "POST",
-        body: formData,
-      });
+      const res = await fetch("/api/extract", { method: "POST", body: formData });
       const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Upload failed");
-      }
+      if (!res.ok) throw new Error(data.error || "Upload failed");
 
       const welcome: Message = {
         id: crypto.randomUUID(),
         role: "assistant",
-        content: `Loaded “${data.name}” (${data.pages} pages). Ask me anything about it.`,
+        content: `📄 **"${data.name}"** loaded (${data.pages} ${data.pages === 1 ? "page" : "pages"}).\n\nAsk me anything about this document.`,
       };
-
       await persist({
         ...session,
         title: titleFromDocument(data.name),
-        document: {
-          name: data.name,
-          pages: data.pages,
-          text: data.text,
-        },
+        document: { name: data.name, pages: data.pages, text: data.text },
         messages: [welcome],
       });
+      setTimeout(() => inputRef.current?.focus(), 100);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Upload failed");
     } finally {
@@ -173,23 +236,16 @@ export default function WorkspacePage() {
 
   async function askQuestion(raw: string) {
     if (!session.document || !raw.trim() || asking) return;
-
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content: raw.trim(),
     };
-
-    const withUser = {
-      ...session,
-      messages: [...session.messages, userMessage],
-    };
-
+    const withUser = { ...session, messages: [...session.messages, userMessage] };
     setQuestion("");
     setAsking(true);
     setError(null);
     await persist(withUser);
-
     try {
       const res = await fetch("/api/ask", {
         method: "POST",
@@ -201,26 +257,19 @@ export default function WorkspacePage() {
         }),
       });
       const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Ask failed");
-      }
-
+      if (!res.ok) throw new Error(data.error || "Ask failed");
       await persist({
         ...withUser,
         messages: [
           ...withUser.messages,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content: data.answer,
-          },
+          { id: crypto.randomUUID(), role: "assistant", content: data.answer },
         ],
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ask failed");
     } finally {
       setAsking(false);
+      setTimeout(() => inputRef.current?.focus(), 80);
     }
   }
 
@@ -229,178 +278,194 @@ export default function WorkspacePage() {
     await askQuestion(question);
   }
 
+  /* ── loading screen ─────────────────────────────────── */
   if (!ready) {
     return (
-      <div className="flex min-h-full items-center justify-center bg-paper text-muted">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-          <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-          <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-          <span className="ml-2">Loading PaperPilot...</span>
+      <div className="flex min-h-full items-center justify-center bg-sidebar-bg">
+        <div className="flex flex-col items-center gap-4">
+          <div className="relative h-10 w-10">
+            <div className="absolute inset-0 rounded-full border-2 border-accent/20" />
+            <div className="absolute inset-0 animate-spin-slow rounded-full border-2 border-transparent border-t-accent" />
+          </div>
+          <span className="text-sm font-medium text-white/50">Loading PaperPilot…</span>
         </div>
       </div>
     );
   }
 
+  /* ── main render ────────────────────────────────────── */
   return (
-    <div className="flex min-h-full flex-col bg-[linear-gradient(180deg,#eef3f7_0%,#e7eef5_100%)]">
-      <header className="sticky top-0 z-20 border-b border-line/80 bg-panel/90 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setSidebarOpen((open) => !open)}
-              className="rounded-lg border border-line px-3 py-2 text-sm font-medium text-ink lg:hidden"
-            >
-              Chats
-            </button>
-            <Link
-              href="/"
-              className="font-[family-name:var(--font-display)] text-xl font-semibold text-ink"
-            >
-              PaperPilot
-            </Link>
-          </div>
-          <div className="hidden min-w-0 flex-1 truncate px-4 text-sm text-muted sm:block">
-            {session.document
-              ? `${session.document.name} · ${session.document.pages} pages`
-              : "No document yet"}
-          </div>
+    <div className="flex h-screen overflow-hidden bg-surface">
+
+      {/* ── Sidebar overlay (mobile) ── */}
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label="Close"
+          className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* ── Sidebar ── */}
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 flex w-72 flex-col bg-sidebar-bg transition-transform duration-300 ease-out lg:relative lg:translate-x-0 lg:w-64 xl:w-72 ${
+          sidebarOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        {/* Logo */}
+        <div className="flex items-center justify-between px-4 py-4 border-b border-white/[0.07]">
+          <Link
+            href="/"
+            className="font-[family-name:var(--font-display)] text-lg font-semibold text-white tracking-tight"
+          >
+            PaperPilot
+          </Link>
           <button
             type="button"
             onClick={startNewChat}
-            className="rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-ink-soft"
+            title="New chat"
+            className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent/20 text-accent transition hover:bg-accent hover:text-white"
           >
-            New chat
+            <IconPlus />
           </button>
         </div>
-      </header>
 
-      <div className="relative mx-auto flex w-full max-w-7xl flex-1 gap-0 lg:gap-6 lg:px-6 lg:py-6">
-        {sidebarOpen && (
+        {/* Chat list */}
+        <div className="scroll-y flex-1 px-2 py-3 space-y-0.5">
+          {sessions.length === 0 ? (
+            <p className="px-3 py-4 text-xs text-white/30 text-center">
+              No saved chats yet.
+              <br />Upload a PDF to start.
+            </p>
+          ) : (
+            sessions.map((chat) => {
+              const active = chat.id === activeId;
+              return (
+                <div
+                  key={chat.id}
+                  className={`group relative flex items-start gap-2 rounded-lg px-3 py-2.5 transition cursor-pointer ${
+                    active
+                      ? "bg-accent/20 text-white"
+                      : "text-white/60 hover:bg-white/[0.06] hover:text-white"
+                  }`}
+                  onClick={() => openChat(chat.id)}
+                >
+                  <span className={`mt-0.5 shrink-0 ${active ? "text-accent" : "text-white/25"}`}>
+                    <IconPdf />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13px] font-medium leading-tight">
+                      {chat.title}
+                    </div>
+                    <div className="mt-0.5 text-[11px] opacity-50">
+                      {chat.document
+                        ? `${chat.messages.length} msg · ${new Date(chat.updatedAt).toLocaleDateString()}`
+                        : "Empty"}
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); removeChat(chat.id); }}
+                    title="Delete"
+                    className="absolute right-2 top-2.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition hover:bg-white/10 hover:text-red-400 group-hover:opacity-100"
+                  >
+                    <IconTrash />
+                  </button>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-4 py-3 border-t border-white/[0.07]">
+          <p className="text-[11px] text-white/25 text-center">
+            Chats saved in this browser only
+          </p>
+        </div>
+      </aside>
+
+      {/* ── Main area ── */}
+      <div className="flex min-w-0 flex-1 flex-col">
+
+        {/* Top bar */}
+        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
           <button
             type="button"
-            aria-label="Close chats"
-            className="fixed inset-0 z-30 bg-ink/35 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
+            onClick={() => setSidebarOpen(true)}
+            className="flex h-8 w-8 items-center justify-center rounded-lg border border-line text-muted transition hover:bg-surface lg:hidden"
+          >
+            <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" stroke="currentColor" strokeWidth={2}>
+              <line x1="3" y1="6"  x2="21" y2="6"  />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
 
-        <aside
-          className={`fixed inset-y-0 left-0 z-40 flex w-[86%] max-w-xs flex-col border-r border-line bg-panel p-4 shadow-xl transition-transform lg:static lg:z-0 lg:w-[280px] lg:max-w-none lg:shrink-0 lg:rounded-2xl lg:border lg:shadow-sm ${
-            sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
-          }`}
-        >
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-ink">Saved chats</h2>
-            <button
-              type="button"
-              onClick={startNewChat}
-              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-hover"
-            >
-              New
-            </button>
-          </div>
-
-          <div className="scrollbar-thin flex-1 space-y-2 overflow-y-auto pr-1">
-            {sessions.length === 0 ? (
-              <p className="rounded-xl bg-paper px-3 py-4 text-sm text-muted">
-                Your chats will appear here after you upload a PDF.
-              </p>
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {session.document ? (
+              <>
+                <span className="text-accent"><IconPdf /></span>
+                <span className="truncate text-sm font-semibold text-ink">
+                  {session.document.name}
+                </span>
+                <span className="rounded-full bg-accent-dim px-2 py-0.5 text-[11px] font-semibold text-accent">
+                  {session.document.pages}p
+                </span>
+              </>
             ) : (
-              sessions.map((chat) => {
-                const active = chat.id === activeId;
-                return (
-                  <div
-                    key={chat.id}
-                    className={`group rounded-xl border px-3 py-3 transition ${
-                      active
-                        ? "border-accent/40 bg-[rgba(15,118,110,0.08)]"
-                        : "border-transparent bg-paper hover:border-line"
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => openChat(chat.id)}
-                      className="w-full text-left"
-                    >
-                      <div className="truncate text-sm font-semibold text-ink">
-                        {chat.title}
-                      </div>
-                      <div className="mt-1 text-xs text-muted">
-                        {chat.document
-                          ? `${chat.messages.length} messages`
-                          : "Empty chat"}
-                        {" · "}
-                        {new Date(chat.updatedAt).toLocaleDateString()}
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => removeChat(chat.id)}
-                      className="mt-2 text-xs font-medium text-muted opacity-100 transition hover:text-red-600 lg:opacity-0 lg:group-hover:opacity-100"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                );
-              })
+              <span className="text-sm text-muted">No document loaded</span>
             )}
           </div>
 
-          <div className="mt-4 rounded-xl border border-dashed border-line px-3 py-3 text-xs text-muted">
-            Chats are saved in this browser only. Clear site data will remove them.
-          </div>
-        </aside>
+          <button
+            type="button"
+            onClick={startNewChat}
+            className="hidden items-center gap-1.5 rounded-lg border border-line bg-white px-3 py-1.5 text-[13px] font-semibold text-ink shadow-sm transition hover:bg-surface lg:flex"
+          >
+            <IconPlus /> New chat
+          </button>
+        </header>
 
-        <main className="flex min-w-0 flex-1 flex-col gap-4 px-4 py-4 lg:px-0 lg:py-0">
-          <section className="rounded-2xl border border-line bg-panel p-4 shadow-sm sm:p-5">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <h2 className="text-sm font-semibold text-ink">Document</h2>
-                <p className="mt-1 text-sm text-muted">
-                  Upload a PDF, then chat. Progress is saved automatically.
-                </p>
-              </div>
-              {session.document && (
-                <div className="rounded-xl bg-paper px-3 py-2 text-sm">
-                  <div className="font-semibold text-ink">{session.document.name}</div>
-                  <div className="text-muted">{session.document.pages} pages loaded</div>
-                </div>
-              )}
-            </div>
+        {/* Body: upload strip + chat */}
+        <div className="flex min-h-0 flex-1 flex-col">
 
+          {/* Upload zone */}
+          <div className="shrink-0 border-b border-line bg-panel px-4 py-3">
             <label
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragOver(true);
-              }}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDragOver(false);
-                onUpload(e.dataTransfer.files?.[0]);
-              }}
-              className={`mt-4 flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-4 py-8 text-center transition ${
+              onDrop={(e) => { e.preventDefault(); setDragOver(false); onUpload(e.dataTransfer.files?.[0]); }}
+              className={`relative flex cursor-pointer items-center gap-3 rounded-xl border transition-all ${
                 dragOver
-                  ? "border-accent bg-[rgba(15,118,110,0.12)]"
-                  : "border-accent/40 bg-[rgba(15,118,110,0.05)] hover:border-accent hover:bg-[rgba(15,118,110,0.08)]"
+                  ? "border-accent bg-accent-dim scale-[1.01]"
+                  : "border-dashed border-accent/40 bg-surface hover:border-accent hover:bg-accent-dim"
               }`}
             >
-              {uploading ? (
-                <div className="flex items-center gap-2 text-sm font-semibold text-ink">
-                  <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-                  <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-                  <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-                  <span className="ml-1">Reading PDF...</span>
-                </div>
-              ) : (
-                <>
-                  <span className="text-sm font-semibold text-ink">
-                    Drop PDF here or tap to choose
-                  </span>
-                  <span className="mt-1 text-xs text-muted">Max 8MB · PDF only</span>
-                </>
+              <div className="flex items-center gap-3 px-4 py-3 flex-1">
+                {uploading ? (
+                  <>
+                    <div className="relative h-6 w-6 shrink-0">
+                      <div className="absolute inset-0 animate-spin-slow rounded-full border-2 border-transparent border-t-accent" />
+                    </div>
+                    <span className="text-sm font-semibold text-ink">Reading PDF…</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-muted"><IconUpload /></span>
+                    <div>
+                      <span className="text-sm font-semibold text-ink">
+                        {session.document ? `Replace: ${session.document.name}` : "Upload a PDF"}
+                      </span>
+                      <span className="ml-2 text-xs text-muted">Drop here or click · max 8MB</span>
+                    </div>
+                  </>
+                )}
+              </div>
+              {session.document && !uploading && (
+                <span className="mr-4 rounded-full bg-accent/10 px-2.5 py-0.5 text-xs font-semibold text-accent">
+                  Loaded
+                </span>
               )}
               <input
                 ref={fileInputRef}
@@ -413,89 +478,145 @@ export default function WorkspacePage() {
             </label>
 
             {error && (
-              <p className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
-                {error}
-              </p>
+              <div className="mt-2 flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                <svg viewBox="0 0 24 24" fill="none" className="mt-0.5 h-4 w-4 shrink-0 text-red-500" stroke="currentColor" strokeWidth={2}><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                <span>{error}</span>
+              </div>
             )}
-          </section>
+          </div>
 
-          <section className="flex min-h-[58vh] flex-1 flex-col rounded-2xl border border-line bg-panel shadow-sm">
-            <div className="scrollbar-thin flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-5">
-              {session.messages.length === 0 ? (
-                <div className="flex h-full min-h-[40vh] flex-col items-center justify-center text-center">
-                  <h1 className="font-[family-name:var(--font-display)] text-3xl font-semibold text-ink sm:text-4xl">
-                    Ask your document
-                  </h1>
-                  <p className="mt-2 max-w-md text-sm text-muted sm:text-base">
-                    Upload a PDF above, then ask things like “What is the total?”
-                    or “Summarize the main points”.
-                  </p>
+          {/* Chat area */}
+          <div className="scroll-y flex-1 px-4 py-5 sm:px-6">
+            {session.messages.length === 0 ? (
+              /* Empty state */
+              <div className="animate-fade flex h-full min-h-[40vh] flex-col items-center justify-center text-center">
+                <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-accent-dim text-accent">
+                  <svg viewBox="0 0 24 24" fill="none" className="h-8 w-8" stroke="currentColor" strokeWidth={1.5}>
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                    <path d="M8 13h8M8 17h5" />
+                  </svg>
                 </div>
-              ) : (
-                session.messages.map((message) => (
-                  <div
-                    key={message.id}
-                    className={`max-w-[92%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 sm:max-w-[80%] ${
-                      message.role === "user"
-                        ? "ml-auto bg-ink text-white"
-                        : "bg-paper text-ink"
-                    }`}
-                  >
-                    {message.content}
-                  </div>
-                ))
-              )}
+                <h2 className="font-[family-name:var(--font-display)] text-2xl font-semibold text-ink sm:text-3xl">
+                  Ask your document
+                </h2>
+                <p className="mt-2 max-w-sm text-sm text-muted">
+                  Upload a PDF above, then ask anything — "Summarize", "What is the total?", "List key dates".
+                </p>
+                <p className="mt-3 text-xs text-muted/60">Press <kbd className="rounded border border-line bg-white px-1.5 py-0.5 font-mono text-[11px]">Enter</kbd> to send</p>
+              </div>
+            ) : (
+              <div className="mx-auto max-w-3xl space-y-5">
+                {session.messages.map((msg) => (
+                  <MessageRow key={msg.id} message={msg} />
+                ))}
+                {asking && <TypingRow />}
+                <div ref={chatEndRef} />
+              </div>
+            )}
+          </div>
 
-              {asking && (
-                <div className="flex max-w-[80%] items-center gap-2 rounded-2xl bg-paper px-4 py-3 text-sm text-muted">
-                  <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-                  <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-                  <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
-                  <span className="ml-1">Thinking...</span>
-                </div>
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            {session.document && !asking && session.messages.length <= 2 && (
-              <div className="flex flex-wrap gap-2 border-t border-line px-4 pt-3 sm:px-5">
-                {SUGGESTIONS.map((item) => (
+          {/* Suggestions */}
+          {session.document && !asking && session.messages.length <= 2 && (
+            <div className="shrink-0 border-t border-line bg-panel/80 px-4 py-2 sm:px-6">
+              <div className="mx-auto flex max-w-3xl flex-wrap gap-2">
+                {SUGGESTIONS.map((s) => (
                   <button
-                    key={item}
+                    key={s}
                     type="button"
-                    onClick={() => askQuestion(item)}
-                    className="rounded-full border border-line bg-white px-3 py-1.5 text-xs font-medium text-ink transition hover:border-accent hover:text-accent"
+                    onClick={() => askQuestion(s)}
+                    className="rounded-full border border-line bg-white px-3 py-1.5 text-xs font-medium text-muted shadow-sm transition hover:border-accent hover:text-accent"
                   >
-                    {item}
+                    {s}
                   </button>
                 ))}
               </div>
-            )}
+            </div>
+          )}
 
-            <form onSubmit={onAsk} className="border-t border-line p-3 sm:p-4">
-              <div className="flex gap-2">
-                <input
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                  disabled={!session.document || asking}
-                  placeholder={
-                    session.document
-                      ? "Ask a question about this PDF..."
-                      : "Upload a PDF first"
-                  }
-                  className="min-w-0 flex-1 rounded-xl border border-line bg-white px-4 py-3 text-sm outline-none ring-accent/30 placeholder:text-muted focus:ring-2 disabled:opacity-60"
-                />
-                <button
-                  type="submit"
-                  disabled={!session.document || asking || !question.trim()}
-                  className="rounded-xl bg-accent px-4 py-3 text-sm font-semibold text-white transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50 sm:px-5"
-                >
-                  {asking ? "..." : "Ask"}
-                </button>
-              </div>
+          {/* Input bar */}
+          <div className="shrink-0 border-t border-line bg-panel px-4 py-3 sm:px-6">
+            <form onSubmit={onAsk} className="mx-auto flex max-w-3xl gap-2">
+              <input
+                ref={inputRef}
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                disabled={!session.document || asking}
+                placeholder={
+                  session.document
+                    ? "Ask anything about this PDF…"
+                    : "Upload a PDF to start asking questions"
+                }
+                className="min-w-0 flex-1 rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink outline-none ring-accent/30 placeholder:text-muted/60 transition focus:border-accent focus:ring-2 disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={!session.document || asking || !question.trim()}
+                className="flex items-center gap-2 rounded-xl bg-accent px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {asking
+                  ? <div className="h-4 w-4 animate-spin-slow rounded-full border-2 border-transparent border-t-white" />
+                  : <><IconSend /><span className="hidden sm:inline">Ask</span></>
+                }
+              </button>
             </form>
-          </section>
-        </main>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Message row ─────────────────────────────────────────── */
+function MessageRow({ message }: { message: Message }) {
+  const isUser = message.role === "user";
+
+  if (isUser) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[75%] rounded-2xl rounded-tr-sm bg-ink px-4 py-3 text-sm leading-6 text-white shadow-sm">
+          {message.content}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-start gap-3">
+      {/* Avatar */}
+      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent-dim text-accent text-[11px] font-bold">
+        PP
+      </div>
+      {/* Bubble */}
+      <div className="group min-w-0 flex-1">
+        <div className="rounded-2xl rounded-tl-sm border border-line/70 bg-panel px-4 py-3 text-sm leading-relaxed text-ink shadow-sm">
+          <div className="prose-ai">
+            <ReactMarkdown>{message.content}</ReactMarkdown>
+          </div>
+        </div>
+        {/* Copy button */}
+        <div className="mt-1 flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+          <CopyButton text={message.content} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Typing indicator ──────────────────────────────────── */
+function TypingRow() {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent-dim text-accent text-[11px] font-bold">
+        PP
+      </div>
+      <div className="rounded-2xl rounded-tl-sm border border-line/70 bg-panel px-4 py-3 shadow-sm">
+        <div className="flex items-center gap-1.5">
+          <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
+          <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
+          <span className="typing-dot h-2 w-2 rounded-full bg-accent" />
+        </div>
       </div>
     </div>
   );
