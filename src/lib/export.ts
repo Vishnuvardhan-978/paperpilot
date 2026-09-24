@@ -96,3 +96,10 @@ export function formatChars(count: number) {
   if (count < 1000) return `${count} chars`;
   return `${(count / 1000).toFixed(1)}k chars`;
 }
+
+/** Rough silent reading time from character count. */
+export function formatReadTime(chars: number) {
+  const words = Math.max(1, Math.round(chars / 5));
+  const minutes = Math.max(1, Math.ceil(words / 200));
+  return minutes === 1 ? "~1 min read" : `~${minutes} min read`;
+}

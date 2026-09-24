@@ -1,3 +1,5 @@
+import type { DocKind } from "@/lib/media";
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -9,11 +11,17 @@ export type DocumentMeta = {
   name: string;
   pages: number;
   text: string;
+  kind?: DocKind;
+  mimeType?: string;
+  sourceUrl?: string;
   sizeBytes?: number;
   charCount?: number;
   preview?: string;
-  /** PDF bytes for in-app preview (IndexedDB structured clone) */
+  /** Binary for in-app preview (PDF/image) — IndexedDB structured clone */
   pdfBytes?: ArrayBuffer;
+  fileBytes?: ArrayBuffer;
+  /** True when text came from OCR rather than native extract */
+  usedOcr?: boolean;
 };
 
 export type ChatSession = {
@@ -35,6 +43,18 @@ const ACTIVE_KEY = "paperpilot-active-chat";
 const ONBOARD_KEY = "paperpilot-onboarded-v1";
 
 export const MAX_DOCS = 3;
+
+/** Works on HTTP LAN IPs where crypto.randomUUID is unavailable (non-secure context). */
+export function newId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -60,20 +80,29 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
+function normalizeDoc(d: DocumentMeta): DocumentMeta {
+  const kind = d.kind || (d.sourceUrl ? "youtube" : "pdf");
+  const fileBytes = d.fileBytes || d.pdfBytes;
+  return {
+    ...d,
+    id: d.id || newId(),
+    kind,
+    fileBytes,
+    pdfBytes: kind === "pdf" ? fileBytes || d.pdfBytes : d.pdfBytes,
+  };
+}
+
 export function normalizeSession(raw: ChatSession): ChatSession {
   const docs =
     raw.documents?.length
       ? raw.documents
       : raw.document
-        ? [{ ...raw.document, id: raw.document.id || crypto.randomUUID() }]
+        ? [raw.document]
         : [];
 
   return {
     ...raw,
-    documents: docs.map((d) => ({
-      ...d,
-      id: d.id || crypto.randomUUID(),
-    })),
+    documents: docs.map(normalizeDoc),
     document: null,
   };
 }
@@ -85,7 +114,7 @@ export function getDocuments(session: ChatSession): DocumentMeta[] {
 export function createEmptySession(): ChatSession {
   const now = Date.now();
   return {
-    id: crypto.randomUUID(),
+    id: newId(),
     title: "New chat",
     createdAt: now,
     updatedAt: now,
@@ -154,7 +183,9 @@ export function clearActiveChatId() {
 }
 
 export function titleFromDocument(name: string) {
-  return name.replace(/\.pdf$/i, "").slice(0, 48) || "Untitled PDF";
+  return name
+    .replace(/\.(pdf|docx?|txt|md|png|jpe?g|webp|gif)$/i, "")
+    .slice(0, 48) || "Untitled";
 }
 
 export function hasSeenOnboarding() {
@@ -168,14 +199,62 @@ export function markOnboardingSeen() {
 
 export function combinedDocumentText(docs: DocumentMeta[]) {
   return docs
-    .map(
-      (d, i) =>
-        `=== Document ${i + 1}: ${d.name} (${d.pages} pages) ===\n${d.text}`,
-    )
+    .map((d, i) => {
+      const label =
+        d.kind === "youtube"
+          ? `=== Source ${i + 1}: ${d.name} (YouTube) ===\n${d.sourceUrl || ""}\n${d.text}`
+          : `=== Document ${i + 1}: ${d.name} (${d.pages} page${d.pages === 1 ? "" : "s"}, ${d.kind || "pdf"}) ===\n${d.text}`;
+      return label;
+    })
     .join("\n\n")
     .slice(0, 100000);
 }
 
+/** Build a cross-chat corpus from every uploaded source in the library. */
+export function buildLibraryCorpus(
+  chats: ChatSession[],
+  maxChars = 90000,
+): { text: string; names: string[]; docCount: number } {
+  const chunks: string[] = [];
+  const names: string[] = [];
+  let used = 0;
+  let docCount = 0;
+
+  for (const chat of chats) {
+    const docs = getDocuments(chat);
+    for (const d of docs) {
+      if (!d.text?.trim() && d.kind !== "youtube") continue;
+      docCount++;
+      const header = `=== Library · chat "${chat.title}" · ${d.name} ===`;
+      const body = (d.text || d.sourceUrl || "").slice(0, 12000);
+      const piece = `${header}\n${body}`;
+      if (used + piece.length > maxChars) {
+        const room = maxChars - used;
+        if (room > 400) {
+          chunks.push(piece.slice(0, room));
+          names.push(d.name);
+        }
+        return { text: chunks.join("\n\n"), names, docCount };
+      }
+      chunks.push(piece);
+      names.push(d.name);
+      used += piece.length + 2;
+    }
+  }
+
+  return { text: chunks.join("\n\n"), names, docCount };
+}
+
 export function documentNames(docs: DocumentMeta[]) {
-  return docs.map((d) => d.name).join(", ") || "document.pdf";
+  return docs.map((d) => d.name).join(", ") || "document";
+}
+
+export function youtubeUrlsFromDocs(docs: DocumentMeta[]) {
+  return docs
+    .filter((d) => d.kind === "youtube" && d.sourceUrl)
+    .map((d) => d.sourceUrl!) as string[];
+}
+
+export function docPreviewBytes(doc: DocumentMeta): ArrayBuffer | undefined {
+  return doc.fileBytes || doc.pdfBytes;
 }

@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Fraunces, Manrope } from "next/font/google";
 import "./globals.css";
 
@@ -15,9 +15,13 @@ const body = Manrope({
 });
 
 export const metadata: Metadata = {
-  title: "PaperPilot — Ask your PDFs anything",
+  title: "PaperPilot — Truth Tutor for every age",
   description:
-    "Upload invoices, resumes, and reports. Ask questions in plain English and get answers in seconds. Built by Vishnu.",
+    "Open tutor without a file, Library ask across chats, Bridge lens (source vs world), plus PDFs/YouTube with Kid/Study/Proof. Built by Vishnu.",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#00d4aa",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
