@@ -42,7 +42,7 @@ const STORE = "chats";
 const ACTIVE_KEY = "paperpilot-active-chat";
 const ONBOARD_KEY = "paperpilot-onboarded-v1";
 
-export const MAX_DOCS = 3;
+export const MAX_DOCS = 4;
 
 /** Works on HTTP LAN IPs where crypto.randomUUID is unavailable (non-secure context). */
 export function newId(): string {
@@ -201,7 +201,9 @@ export function combinedDocumentText(docs: DocumentMeta[]) {
   return docs
     .map((d, i) => {
       const label =
-        d.kind === "youtube"
+        d.kind === "workspace"
+          ? `=== Workspace ${i + 1}: ${d.name} (${d.pages} file${d.pages === 1 ? "" : "s"}) ===\n${d.text}`
+          : d.kind === "youtube"
           ? `=== Source ${i + 1}: ${d.name} (YouTube) ===\n${d.sourceUrl || ""}\n${d.text}`
           : `=== Document ${i + 1}: ${d.name} (${d.pages} page${d.pages === 1 ? "" : "s"}, ${d.kind || "pdf"}) ===\n${d.text}`;
       return label;

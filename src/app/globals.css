@@ -429,7 +429,7 @@ body {
 .stage-actions {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   gap: 10px;
   width: min(520px, 100%);
   margin-top: 1.75rem;
@@ -711,4 +711,87 @@ body {
   color: var(--accent2);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+/* ── Workspace explorer (Cursor-like) ── */
+.workspace-pane {
+  scrollbar-width: thin;
+}
+.workspace-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.workspace-tree summary {
+  cursor: pointer;
+  list-style: none;
+  color: #8ca3be;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.8;
+  user-select: none;
+}
+.workspace-tree summary::-webkit-details-marker {
+  display: none;
+}
+.workspace-tree summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 10px;
+  margin-right: 4px;
+  color: #5a7390;
+}
+.workspace-tree details[open] > summary::before {
+  content: "▾";
+}
+.workspace-file {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #9eb2c9;
+  font-size: 11px;
+  text-align: left;
+  line-height: 1.7;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.workspace-file:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+}
+.workspace-file.is-active {
+  background: rgba(0, 212, 170, 0.12);
+  color: #00d4aa;
+}
+
+.diff-add,
+.diff-del,
+.diff-same {
+  display: flex;
+  gap: 8px;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diff-add {
+  background: rgba(46, 160, 67, 0.28);
+  color: #b7f0c8;
+}
+.diff-del {
+  background: rgba(248, 113, 113, 0.12);
+  color: #fca5a5;
+}
+.diff-same {
+  color: #7e93ab;
+}
+.diff-gutter {
+  width: 12px;
+  flex-shrink: 0;
+  opacity: 0.8;
+  font-weight: 700;
+}
+.diff-text {
+  min-width: 0;
+  flex: 1;
 }

@@ -1,4 +1,4 @@
-export type DocKind = "pdf" | "image" | "text" | "docx" | "youtube";
+export type DocKind = "pdf" | "image" | "text" | "docx" | "youtube" | "workspace";
 
 export const ACCEPTED_FILE_TYPES =
   "application/pdf,.pdf,image/png,image/jpeg,image/jpg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif,text/plain,.txt,.md,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx";
@@ -107,6 +107,8 @@ export function kindLabel(kind?: DocKind): string {
       return "Word";
     case "youtube":
       return "YouTube";
+    case "workspace":
+      return "Workspace";
     case "pdf":
     default:
       return "PDF";

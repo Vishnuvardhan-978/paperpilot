@@ -139,6 +139,41 @@ export async function* streamWithFallback(
     : new Error("Gemini is busy. Please try again in a moment.");
 }
 
+/** Non-streaming text generation (agent tool decisions). */
+export async function generateTextOnce(input: string | ContentPart[]): Promise<string> {
+  const ai = getClient();
+  let lastError: unknown;
+  const contents = asContents(input);
+
+  for (const modelName of MODEL_CANDIDATES) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const result = await ai.models.generateContent({
+          model: modelName,
+          contents,
+        });
+        const text = result.text?.trim();
+        if (text) return text;
+        throw new Error("Empty response from Gemini");
+      } catch (error) {
+        lastError = error;
+        if (isRetryable(error) && attempt < 2) {
+          await sleep(700 * attempt);
+          continue;
+        }
+        if (isRetryable(error) || isModelSkip(error)) {
+          break;
+        }
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Gemini is busy. Please try again in a moment.");
+}
+
 const OCR_PROMPT = (fileName: string) =>
   `You are extracting content for a document Q&A app.
 File name: ${fileName}
@@ -317,6 +352,10 @@ export function buildAskPrompt(
   const videoNote = hasVideo
     ? `\n- One or more YouTube videos are attached as media. Use the video content (speech + visuals) together with any document text below.`
     : "";
+  const hasWorkspace = documentText.includes("=== Workspace ");
+  const workspaceNote = hasWorkspace
+    ? `\nWORKSPACE AGENT MODE: A project folder is attached as text snippets (Cursor-like assistant).\n- Cite file paths from "--- file: path ---" headers.\n- If a focused file is mentioned, prioritize it.\n- For edits, NEVER paste a tiny fragment as if it were the whole file (that would wipe the file).\n- Prefer SEARCH/REPLACE hunks inside one fenced block (keep surrounding code unchanged):\n  // path: relative/file.ext\n  <<<<<<< SEARCH\n  exact old lines from the file\n  =======\n  replacement lines\n  >>>>>>> REPLACE\n- Only output the FULL file when the change is a rewrite and you include every line.\n- First line of the code block MUST be a path comment, e.g. // path: src/app/page.tsx (use # path: for python/shell).\n- Do NOT claim you already edited files unless the user clicked Apply and the local agent confirmed.`
+    : "";
 
   const intentNote =
     intent === "quiz"
@@ -337,10 +376,16 @@ export function buildAskPrompt(
 
   const scopeNote =
     scope === "open"
-      ? `\nSCOPE: OPEN TUTOR — No required file. Use careful general knowledge.`
+      ? `
+SCOPE: OPEN TUTOR - No required file. Use careful general knowledge.`
       : scope === "library"
-        ? `\nSCOPE: LIBRARY — Answer using the user's library corpus (many past uploads). Cite which chat/file a fact came from when possible.`
-        : `\nSCOPE: THIS CHAT — Prefer attached sources in this chat.`;
+        ? `
+SCOPE: LIBRARY - Answer using the user's library corpus (many past uploads). Cite which chat/file a fact came from when possible.`
+        : hasWorkspace
+          ? `
+SCOPE: WORKSPACE - Prefer attached project files in this chat. Cite exact file paths when useful.`
+          : `
+SCOPE: THIS CHAT - Prefer attached sources in this chat.`;
 
   const bridgeForce =
     lens === "bridge" && scope !== "open"
@@ -350,7 +395,9 @@ export function buildAskPrompt(
         : "";
 
   const docsOnly =
-    scope === "docs" && lens !== "bridge"
+    scope === "docs" && lens !== "bridge" && hasWorkspace
+      ? `- Use only facts found in the attached project files / sources.\n- Cite file paths for code claims.\n- If you need files that were skipped or not attached, say what is missing.\n- Do not pretend to modify files, run tests, or inspect the terminal in this web MVP.`
+      : scope === "docs" && lens !== "bridge"
       ? `- Use only facts found in the document(s) / video(s).\n- If the answer is not in the sources, say you cannot find it.`
       : scope === "library" && lens !== "bridge"
         ? `- Prefer facts from the library corpus.\n- If missing, say so — do not invent library quotes.`
@@ -378,6 +425,7 @@ User question: ${question}`;
 ${lensSystemRules(lens)}
 ${intentNote}
 ${scopeNote}
+${workspaceNote}
 
 Rules:
 - Always refer to documents by their real file names.
@@ -398,13 +446,14 @@ ${tail}`;
 ${lensSystemRules(lens)}
 ${intentNote}
 ${scopeNote}
+${workspaceNote}
 ${bridgeForce}
 
 Rules:
 - Match answer length to the question (short question → short answer).
 - Answer clearly for the active lens.
 ${docsOnly}
-- When multiple documents are provided, say which document a fact comes from when useful.
+- When multiple documents, videos, or workspace files are provided, say which source a fact comes from when useful.
 - Use markdown only when it helps.${videoNote}
 ${tail}`;
 }
