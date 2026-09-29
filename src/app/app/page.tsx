@@ -1576,10 +1576,18 @@ export default function App() {
           )}
           {/* chat column — right side once a project folder is open */}
           <div className={ideLayout
-            ? "flex min-h-0 w-full min-w-0 flex-1 flex-col border-white/[0.06] lg:w-[400px] lg:max-w-[440px] lg:flex-none lg:border-l"
+            ? "flex min-h-0 w-full min-w-0 flex-1 flex-col border-white/[0.06] bg-[#080d1c] lg:w-[420px] lg:min-w-[360px] lg:max-w-[440px] lg:flex-none lg:border-l"
             : "flex min-w-0 flex-1 flex-col"}>
+            {ideLayout && (
+              <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.06] bg-[#080d1c] px-3">
+                <span className="text-[12px] font-semibold text-white">Agent</span>
+                <span className={`ml-auto text-[10px] font-semibold ${agentOnline ? "text-[#00d4aa]" : "text-amber-200"}`}>
+                  {agentOnline ? "Online" : "Offline"}
+                </span>
+              </div>
+            )}
             {/* compact sources strip — uploads live in the composer (+ / link) */}
-            <div className="shrink-0 border-b border-white/[0.06] px-4 py-2 sm:px-6">
+            <div className={`shrink-0 border-b border-white/[0.06] px-3 py-2 sm:px-4 ${ideLayout && !error && !uploading && !openingWorkspace ? "hidden" : ""}`}>
               {(uploading || openingWorkspace) && (
                 <div className="mx-auto mb-2 flex max-w-2xl items-center gap-2 rounded-xl border border-[#00d4aa]/20 bg-[#00d4aa]/5 px-3 py-2 text-sm text-[#8ca3be]">
                   <Spinner /><span>{openingWorkspace ? "Choose a folder in the Windows dialog (check the taskbar if you don't see it)…" : "Reading file... scanned PDFs use OCR and can take 30-90s (local work, not usually your Wi-Fi)."}</span>
@@ -1682,7 +1690,7 @@ export default function App() {
               />
             </div>
 
-            <div className="scroll-y min-h-0 flex-1 px-4 py-6 sm:px-6">
+            <div className={`scroll-y min-h-0 flex-1 ${ideLayout ? "px-3 py-4" : "px-4 py-6 sm:px-6"}`}>
               {session.messages.length === 0 ? (
                 <div className="stage-empty">
                   <div className="stage-folios" aria-hidden>
@@ -1742,7 +1750,7 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                <div className="mx-auto max-w-2xl space-y-6">
+                <div className={ideLayout ? "space-y-4" : "mx-auto max-w-2xl space-y-6"}>
                   {session.messages.map((m, i) => {
                     const isLastUser =
                       m.role === "user" &&
@@ -1781,8 +1789,8 @@ export default function App() {
               )}
             </div>
 
-            <div className="shrink-0 border-t border-white/[0.06] bg-[rgba(6,9,26,0.88)] px-3 py-3.5 backdrop-blur-xl sm:px-6 sm:py-4">
-              <div className="composer-dock">
+            <div className={`shrink-0 border-t border-white/[0.06] bg-[rgba(6,9,26,0.92)] backdrop-blur-xl ${ideLayout ? "px-3 py-3" : "px-3 py-3.5 sm:px-6 sm:py-4"}`}>
+              <div className={`composer-dock ${ideLayout ? "is-ide" : ""}`}>
                 <div className="composer-meta">
                   <span>
                     {docs.length > 0 ? (
@@ -2261,30 +2269,37 @@ function DirectWorkspacePane({
 
   return (
     <div className="flex min-h-0 flex-1">
-      <div className="workspace-pane w-[248px] shrink-0 overflow-auto border-r border-white/[0.06] bg-[#080d1c] py-2">
-        <div className="px-3 pb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[#c5d4e6]">
-          {meta?.name || "Project"}
+      <div className="flex h-full min-h-0 w-[252px] shrink-0 flex-col border-r border-white/[0.06] bg-[#080d1c]">
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.06] px-3">
+          <span className="min-w-0 truncate text-[12px] font-semibold uppercase tracking-[0.08em] text-[#e8eef8]">
+            {meta?.name || "Project"}
+          </span>
+          <span className="ml-auto shrink-0 text-[10px] text-[#5a7390]">{paths.length}</span>
         </div>
-        <div className="px-3 pb-2 text-[10px] text-[#415570]" title={meta?.root}>
-          {paths.length} files
+        <div className="workspace-pane min-h-0 flex-1 overflow-auto py-1">
+          <WorkspaceTree
+            nodes={tree}
+            focusPath={activePath}
+            onFocusPath={(p) => onFocusPath?.(p)}
+          />
         </div>
-        <WorkspaceTree
-          nodes={tree}
-          focusPath={activePath}
-          onFocusPath={(p) => onFocusPath?.(p)}
-        />
       </div>
       <div className="flex min-w-0 flex-1 flex-col bg-[#0b1127]">
-        <div className="flex h-9 shrink-0 items-end border-b border-white/[0.06] bg-[#080d1c]">
+        <div className="flex h-9 shrink-0 items-center border-b border-white/[0.06] bg-[#080d1c]">
           {fileName ? (
-            <div className="flex max-w-[280px] items-center gap-2 border-r border-white/[0.08] bg-[#0b1127] px-3 py-2 text-[12px] text-white">
-              <span className="truncate">{fileName}</span>
-              {shownReview ? <span className="text-[10px] font-semibold text-[#00d4aa]">edited</span> : null}
-            </div>
+            <>
+              <div className="flex h-9 min-w-0 max-w-[320px] items-center gap-2 border-r border-white/[0.08] bg-[#0b1127] px-3 text-[12px] text-white">
+                <span className="truncate font-medium">{fileName}</span>
+                {shownReview ? <span className="shrink-0 text-[10px] font-semibold text-[#00d4aa]">edited</span> : null}
+              </div>
+              <div className="min-w-0 flex-1 truncate px-3 text-[11px] text-[#5a7390]" title={activePath || ""}>
+                {activePath}
+              </div>
+            </>
           ) : (
             <div className="px-3 py-2 text-[12px] text-[#415570]">Select a file</div>
           )}
-          <div className="ml-auto flex items-center gap-2 px-2 pb-1">
+          <div className="ml-auto flex shrink-0 items-center gap-1.5 px-2">
             {loading ? <span className="text-[10px] text-[#415570]">reading…</span> : null}
             {shownReview && (
               <button

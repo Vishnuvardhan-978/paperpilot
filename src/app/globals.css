@@ -504,6 +504,46 @@ body {
   font-weight: 600;
 }
 
+.composer-dock.is-ide {
+  max-width: none;
+}
+.composer-dock.is-ide .composer-meta {
+  gap: 8px;
+}
+.composer-dock.is-ide .composer-meta > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-dock.is-ide .composer-meta > span:last-child {
+  flex-shrink: 0;
+}
+.composer-dock.is-ide .composer-desk {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 14px;
+}
+.composer-dock.is-ide .composer-field {
+  flex: 1 1 100%;
+  order: -1;
+  padding: 2px 6px 0;
+}
+.composer-dock.is-ide .composer-divider {
+  display: none;
+}
+.composer-dock.is-ide .composer-tools {
+  padding-bottom: 0;
+}
+.composer-dock.is-ide .composer-send {
+  margin-left: auto;
+  margin-bottom: 0;
+  height: 36px;
+  width: 36px;
+}
+
 .composer-desk {
   position: relative;
   display: flex;
@@ -722,13 +762,24 @@ body {
   margin: 0;
   padding: 0;
 }
+.workspace-tree summary,
+.workspace-file {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  margin: 1px 6px;
+  padding-right: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 6px;
+  white-space: nowrap;
+}
 .workspace-tree summary {
   cursor: pointer;
   list-style: none;
-  color: #8ca3be;
-  font-size: 11px;
+  color: #c5d4e6;
+  font-size: 12px;
   font-weight: 600;
-  line-height: 1.8;
   user-select: none;
 }
 .workspace-tree summary::-webkit-details-marker {
@@ -745,16 +796,13 @@ body {
   content: "▾";
 }
 .workspace-file {
-  display: block;
-  width: 100%;
+  width: calc(100% - 12px);
   border: 0;
   background: transparent;
   color: #9eb2c9;
-  font-size: 11px;
+  font-size: 12px;
   text-align: left;
-  line-height: 1.7;
   cursor: pointer;
-  border-radius: 4px;
 }
 .workspace-file:hover {
   background: rgba(255, 255, 255, 0.04);

@@ -53,10 +53,33 @@ function send(res, status, body) {
 
 function safeJoin(rel) {
   const clean = String(rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
-  if (clean.includes("..")) throw new Error("Path escape blocked");
+  if (clean.split("/").includes("..")) throw new Error("Path escape blocked");
   const full = path.resolve(ROOT, clean);
-  if (!full.startsWith(ROOT)) throw new Error("Path outside workspace");
+  const rootCmp = ROOT.endsWith(path.sep) ? ROOT : ROOT + path.sep;
+  if (full !== ROOT && !full.toLowerCase().startsWith(rootCmp.toLowerCase())) {
+    throw new Error("Path outside workspace");
+  }
   return full;
+}
+
+/** Drop a repeated project-folder prefix so EEAIAdmin/EEAIAdmin/file resolves to EEAIAdmin/file. */
+function resolveInsideRoot(rel) {
+  const clean = String(rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  const options = [clean];
+  const base = path.basename(ROOT);
+  let cur = clean;
+  const prefix = base.toLowerCase() + "/";
+  while (base && cur.toLowerCase().startsWith(prefix)) {
+    cur = cur.slice(base.length + 1);
+    options.push(cur);
+  }
+  let fallback = null;
+  for (const option of options) {
+    const full = safeJoin(option);
+    if (!fallback) fallback = full;
+    if (fs.existsSync(full)) return full;
+  }
+  return fallback;
 }
 
 function readBody(req) {
@@ -114,7 +137,17 @@ function walkTreePaths(dir, acc = [], depth = 0) {
       walkTreePaths(path.join(dir, d.name), acc, depth + 1);
     } else if (d.isFile()) {
       if (d.name.startsWith(".") && d.name !== ".env.example" && d.name !== ".gitignore") continue;
-      acc.push(path.relative(ROOT, path.join(dir, d.name)).replace(/\\/g, "/"));
+      const full = path.join(dir, d.name);
+      let rel = path.relative(ROOT, full).replace(/\\/g, "/");
+      const base = path.basename(ROOT);
+      const prefix = base.toLowerCase() + "/";
+      if (base && rel.toLowerCase().startsWith(prefix)) {
+        const stripped = rel.slice(base.length + 1);
+        if (fs.existsSync(path.join(ROOT, stripped)) && !fs.existsSync(path.join(ROOT, rel))) {
+          rel = stripped;
+        }
+      }
+      acc.push(rel);
     }
   }
   return acc;
@@ -385,7 +418,7 @@ const server = http.createServer(async (req, res) => {
         send(res, 400, { error: "path required" });
         return;
       }
-      const full = safeJoin(rel);
+      const full = resolveInsideRoot(rel);
       const text = fs.readFileSync(full, "utf8");
       send(res, 200, { path: rel, text });
       return;
@@ -405,7 +438,7 @@ const server = http.createServer(async (req, res) => {
         send(res, 400, { error: "path and text required" });
         return;
       }
-      const full = safeJoin(body.path);
+      const full = resolveInsideRoot(body.path);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       let backup = null;
       if (fs.existsSync(full)) {
