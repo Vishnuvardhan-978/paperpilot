@@ -1,8 +1,16 @@
 import type { NextConfig } from "next";
+import os from "os";
+
+// LAN IPs change between networks; read them at startup so the dev server accepts this machine's current address.
+function currentLanIps() {
+  return Object.values(os.networkInterfaces())
+    .flat()
+    .filter((iface) => iface && iface.family === "IPv4" && !iface.internal)
+    .map((iface) => iface!.address);
+}
 
 const nextConfig: NextConfig = {
-  // Allow opening the app from this machine's LAN IP in development
-  allowedDevOrigins: ["172.16.3.173", "10.3.1.130", "172.16.0.46", "10.43.140.233"],
+  allowedDevOrigins: currentLanIps(),
   // Allow file uploads up to 10MB (FormData to /api/extract)
   experimental: {
     serverActions: {
