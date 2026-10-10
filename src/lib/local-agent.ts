@@ -65,12 +65,12 @@ export async function agentReadFile(relPath: string) {
   return { path: data.path || relPath, text: data.text ?? "" };
 }
 
-export async function agentWriteFile(relPath: string, text: string) {
+export async function agentWriteFile(relPath: string, text: string, opts: { backup?: boolean } = {}) {
   const base = agentBaseUrl();
   const r = await fetch(`${base}/write`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: relPath, text }),
+    body: JSON.stringify({ path: relPath, text, backup: opts.backup ?? true }),
   });
   const data = (await r.json().catch(() => ({}))) as {
     ok?: boolean;
@@ -85,10 +85,38 @@ export async function agentWriteFile(relPath: string, text: string) {
   return data;
 }
 
-export async function agentSearch(query: string, relPath = ".") {
+/** Copy `<path>.ppbak` back over the file (one-level undo that survives a page refresh). */
+export async function agentRestoreBackup(relPath: string) {
+  const base = agentBaseUrl();
+  const r = await fetch(`${base}/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: relPath }),
+  });
+  const data = (await r.json().catch(() => ({}))) as { ok?: boolean; text?: string; error?: string };
+  if (!r.ok || !data.ok) throw new Error(data.error || `Restore failed (${r.status})`);
+  return { text: data.text ?? "" };
+}
+
+export async function agentDeleteFile(relPath: string) {
+  const base = agentBaseUrl();
+  const r = await fetch(`${base}/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: relPath }),
+  });
+  const data = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!r.ok || !data.ok) throw new Error(data.error || `Delete failed (${r.status})`);
+}
+
+export async function agentSearch(
+  query: string,
+  relPath = ".",
+  opts: { regex?: boolean; caseSensitive?: boolean } = {},
+) {
   const base = agentBaseUrl();
   const r = await fetch(
-    `${base}/search?q=${encodeURIComponent(query)}&path=${encodeURIComponent(relPath)}`,
+    `${base}/search?q=${encodeURIComponent(query)}&path=${encodeURIComponent(relPath)}${opts.regex ? "&regex=1" : ""}${opts.caseSensitive ? "&case=1" : ""}`,
   );
   const data = (await r.json().catch(() => ({}))) as {
     query?: string;

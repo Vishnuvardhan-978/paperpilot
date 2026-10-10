@@ -11,6 +11,8 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import {
+  type AgentRunView,
+  type AgentStepView,
   ChatSession,
   DocumentMeta,
   MAX_DOCS,
@@ -69,10 +71,24 @@ import {
 } from "@/lib/lenses";
 import type { AskScope } from "@/lib/scopes";
 import { canSpeak, speakText, stopSpeaking } from "@/lib/speak";
-import { MAX_AGENT_STEPS, type AgentToolStep } from "@/lib/agent-tools";
-import { formatAgentProgress, runLocalAgentTool } from "@/lib/run-agent-tool";
+import { MAX_AGENT_STEPS, describeToolCall, toolResultError, type AgentToolCall } from "@/lib/agent-tools";
+import { runLocalAgentTool } from "@/lib/run-agent-tool";
+import { compactOldToolResults, lastThought, streamAgentStep } from "@/lib/agent-stream";
+import type { AgentContent } from "@/lib/gemini";
+import {
+  changeStats,
+  recordAgentChange,
+  revertAgentChange,
+  samePath,
+  type AgentChange,
+} from "@/lib/agent-changes";
+import { CodeDiff, CodeEditor } from "@/components/code-editor";
+import { TerminalPanel, type TerminalEntry } from "@/components/terminal-panel";
+import { AgentReply } from "@/components/agent-reply";
+import { FileIcon, QuickOpen, SearchPanel, Splitter, useStoredWidth } from "@/components/workspace-ui";
 import {
   directWorkspaceHint,
+  directWorkspaceRoot,
   encodeDirectWorkspace,
   isDirectWorkspaceText,
   parseDirectWorkspace,
@@ -86,8 +102,10 @@ import {
   type TreeNode,
 } from "@/lib/workspace-files";
 import {
+  agentExec,
   agentPickFolder,
   agentReadFile,
+  agentRestoreBackup,
   agentSetWorkspace,
   agentTree,
   agentWriteFile,
@@ -256,7 +274,13 @@ export default function App() {
   const [patchSourceMsgId, setPatchSourceMsgId] = useState<string | null>(null);
   const [agentOnline, setAgentOnline] = useState(false);
   const [fileEpoch, setFileEpoch] = useState(0);
-  const [reviewDiff, setReviewDiff] = useState<{ path: string; before: string; after: string } | null>(null);
+  const [reviewPath, setReviewPath] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalLog, setTerminalLog] = useState<TerminalEntry[]>([]);
+  const [terminalBusy, setTerminalBusy] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [chatWidth, setChatWidth] = useStoredWidth("paperpilot-ide-chat", 420);
+  const chatDragStart = useRef(0);
   const [streak, setStreak] = useState({ count: 0, best: 0, quizzes: 0, claims: 0 });
   const abortRef = useRef<AbortController | null>(null);
   const recogRef = useRef<{ stop: () => void } | null>(null);
@@ -272,6 +296,38 @@ export default function App() {
       previewDoc.text &&
       isDirectWorkspaceText(previewDoc.text),
   );
+  const agentChanges = useMemo(() => session.agentChanges ?? [], [session.agentChanges]);
+  const pendingChanges = agentChanges.filter((c) => c.status === "pending");
+  const workspaceRoot = directWorkspaceRoot(workspaceDoc?.text);
+  const projectChats = useMemo(
+    () =>
+      workspaceRoot
+        ? sessions.filter((chat) =>
+            getDocuments(chat).some(
+              (d) => d.kind === "workspace" && directWorkspaceRoot(d.text)?.toLowerCase() === workspaceRoot.toLowerCase(),
+            ),
+          )
+        : [],
+    [sessions, workspaceRoot],
+  );
+  const ideProps: IdeProps = {
+    fileEpoch,
+    changes: agentChanges,
+    reviewPath,
+    onOpenChange: openChangeInEditor,
+    onCloseReview: () => setReviewPath(null),
+    onSetChangeStatus: (paths, status) => void setChangeStatus(paths, status),
+    onRestoreBackup: (p) => void restoreFromBackup(p),
+    onSaveFile: saveFileManually,
+    terminal: {
+      open: terminalOpen,
+      entries: terminalLog,
+      busy: terminalBusy,
+      onRun: (cmd) => void runTerminalCommand(cmd),
+      onClear: () => setTerminalLog([]),
+      onToggle: () => setTerminalOpen((v) => !v),
+    },
+  };
   /** Auto: with a file → This chat; without → Open tutor (no mode pills). */
   const scope: AskScope = docs.length > 0 ? "docs" : "open";
   const canQuery = true;
@@ -497,8 +553,17 @@ export default function App() {
       };
     }
     const ping = () => {
-      void checkLocalAgent().then((h) => {
-        if (alive) setAgentOnline(h.ok);
+      void checkLocalAgent().then(async (h) => {
+        if (!alive) return;
+        setAgentOnline(h.ok);
+        // The agent restarts in its own cwd; point it back at this chat's project.
+        if (!h.ok || !workspaceRoot || h.workspace?.toLowerCase() === workspaceRoot.toLowerCase()) return;
+        try {
+          await agentSetWorkspace(workspaceRoot);
+          if (alive) setFileEpoch((n) => n + 1);
+        } catch {
+          if (alive) setError(`Project folder not found on this machine: ${workspaceRoot}`);
+        }
       });
     };
     ping();
@@ -507,7 +572,7 @@ export default function App() {
       alive = false;
       window.clearInterval(id);
     };
-  }, [hasWorkspace]);
+  }, [hasWorkspace, workspaceRoot]);
 
   useEffect(() => {
     if (!hasWorkspace || asking) return;
@@ -569,6 +634,113 @@ export default function App() {
     setPendingPatch(null);
   }
 
+  async function setChangeStatus(paths: string[], status: AgentChange["status"]) {
+    const list = session.agentChanges ?? [];
+    const targets = list.filter((c) => paths.some((p) => samePath(p, c.path)) && c.status !== status);
+    if (!targets.length) return;
+    if (status === "reverted") {
+      try {
+        for (const change of targets) await revertAgentChange(change);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not restore file");
+        return;
+      }
+      setFileEpoch((n) => n + 1);
+    }
+    await save({
+      ...session,
+      agentChanges: list.map((c) => (targets.includes(c) ? { ...c, status } : c)),
+    });
+    if (reviewPath && targets.some((c) => samePath(c.path, reviewPath))) setReviewPath(null);
+  }
+
+  async function restoreFromBackup(relPath: string) {
+    if (!window.confirm(`Restore ${relPath} from its .ppbak backup (the version before the last save)?`)) return;
+    try {
+      await agentRestoreBackup(relPath);
+      setFileEpoch((n) => n + 1);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Restore failed");
+    }
+  }
+
+  async function saveFileManually(relPath: string, text: string) {
+    await agentWriteFile(relPath, text);
+    setFileEpoch((n) => n + 1);
+  }
+
+  function openChangeInEditor(relPath: string) {
+    setReviewPath(relPath);
+    setWorkspaceFocusPath(relPath);
+    setPreviewOpen(true);
+    if (workspaceDoc) setPreviewDocId(workspaceDoc.id);
+  }
+
+  async function runTerminalCommand(command: string, source: TerminalEntry["source"] = "you", cwd = ".") {
+    const id = newId();
+    setTerminalOpen(true);
+    setTerminalLog((log) => [...log, { id, command, cwd, source, running: true }]);
+    if (source === "you") setTerminalBusy(true);
+    try {
+      const out = await agentExec(command, cwd);
+      setTerminalLog((log) =>
+        log.map((e) =>
+          e.id === id
+            ? { ...e, running: false, code: out.code, timedOut: out.timedOut, stdout: out.stdout, stderr: out.stderr }
+            : e,
+        ),
+      );
+    } catch (err) {
+      setTerminalLog((log) =>
+        log.map((e) =>
+          e.id === id ? { ...e, running: false, code: -1, stderr: err instanceof Error ? err.message : "Command failed" } : e,
+        ),
+      );
+    } finally {
+      if (source === "you") setTerminalBusy(false);
+    }
+  }
+
+  function logAgentTerminal(call: AgentToolCall, result: string) {
+    let out: { code?: number | null; timedOut?: boolean; stdout?: string; stderr?: string; error?: string } = {};
+    try {
+      out = JSON.parse(result);
+    } catch {
+      out = { stdout: result };
+    }
+    setTerminalOpen(true);
+    setTerminalLog((log) => [
+      ...log,
+      {
+        id: newId(),
+        command: call.args.command || "(no command given)",
+        cwd: call.args.cwd || ".",
+        source: "agent",
+        running: false,
+        code: out.error ? -1 : out.code,
+        timedOut: out.timedOut,
+        stdout: out.stdout,
+        stderr: out.error || out.stderr,
+      },
+    ]);
+  }
+
+  async function newChatInProject() {
+    if (!workspaceDoc) return newChat();
+    const s = createEmptySession();
+    setError(null);
+    setQ("");
+    setPendingPatch(null);
+    setPatchSourceMsgId(null);
+    setReviewPath(null);
+    setHistoryOpen(false);
+    await save({ ...s, title: `${workspaceDoc.name} workspace`, documents: [workspaceDoc] });
+    setPreviewDocId(workspaceDoc.id);
+    setPreviewOpen(true);
+    setTimeout(() => inputRef.current?.focus(), 80);
+  }
+
   async function save(next: ChatSession) {
     const s = {
       ...next,
@@ -617,8 +789,13 @@ export default function App() {
     setActiveId(found.id);
     setActiveChatId(found.id);
     setNavOpen(false);
+    setHistoryOpen(false);
+    setReviewPath(null);
+    setPendingPatch(null);
     const d = getDocuments(found);
-    setPreviewDocId(d[0]?.id ?? null);
+    const ws = d.find((x) => x.kind === "workspace" && isDirectWorkspaceText(x.text));
+    setPreviewDocId(ws?.id ?? d[0]?.id ?? null);
+    if (ws) setPreviewOpen(true);
     setTimeout(() => inputRef.current?.focus(), 80);
   }
 
@@ -949,125 +1126,128 @@ export default function App() {
       const useAgentLoop = hasWorkspace && agentOnline && intent === "ask";
 
       if (useAgentLoop) {
-        const steps: AgentToolStep[] = [];
-        let answer = formatAgentProgress(steps, "planning…");
-        setSession((prev) => ({
-          ...prev,
-          messages: prev.messages.map((m) =>
-            m.id === assistantId ? { ...m, content: answer } : m,
-          ),
-        }));
+        const meta = workspaceDoc && isDirectWorkspaceText(workspaceDoc.text) ? parseDirectWorkspace(workspaceDoc.text) : null;
+        const project = {
+          name: meta?.name || workspaceDoc?.name || "workspace",
+          root: meta?.root,
+          paths: meta?.paths || [],
+        };
+        const turns: AgentContent[] = [];
+        let model: string | null = null;
+        let runChanges: AgentChange[] = next.agentChanges ?? [];
+        let run: AgentRunView = { steps: [], working: true, startedAt: Date.now() };
+        let answer = "";
+        const show = () => {
+          const view = run;
+          const content = answer;
+          setSession((prev) => ({
+            ...prev,
+            messages: prev.messages.map((m) => (m.id === assistantId ? { ...m, content, agent: view } : m)),
+          }));
+        };
+        const patchStep = (id: string, patch: Partial<AgentStepView>) => {
+          run = { ...run, steps: run.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) };
+        };
+        show();
 
-        for (let i = 0; i < MAX_AGENT_STEPS; i++) {
+        let finished = false;
+        for (let round = 0; round < MAX_AGENT_STEPS && !finished; round++) {
           if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
 
-          const stepRes = await fetch("/api/agent/step", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            signal: controller.signal,
-            body: JSON.stringify({
-              question,
-              focusPath: workspaceFocusPath,
-              documentName,
-              workspaceHint: "Local agent phase 2: list/read/search/write/exec on PAPERPILOT_WORKSPACE",
-              steps,
-            }),
-          });
-          const stepData = (await stepRes.json().catch(() => ({}))) as {
-            decision?: { action: string; call?: AgentToolStep["call"]; text?: string };
-            error?: string;
-          };
-          if (!stepRes.ok) throw new Error(stepData.error || "Agent step failed");
+          const step = await streamAgentStep(
+            { question: displayQuestion, history, project, focusPath: workspaceFocusPath, turns, model },
+            controller.signal,
+            (live) => {
+              run = { ...run, thinking: lastThought(live.thought) };
+              answer = live.text;
+              show();
+            },
+          );
+          model = step.model;
+          turns.push(step.modelContent);
+          run = { ...run, model, thinking: undefined };
 
-          const decision = stepData.decision;
-          if (!decision) throw new Error("Empty agent decision");
-
-          if (decision.action === "done") {
-            answer = [
-              steps.length
-                ? `${formatAgentProgress(steps)}\n\n---\n\n${decision.text || "Done."}`
-                : decision.text || "Done.",
-            ].join("");
-            setSession((prev) => ({
-              ...prev,
-              messages: prev.messages.map((m) =>
-                m.id === assistantId ? { ...m, content: answer } : m,
-              ),
-            }));
+          if (!step.calls.length) {
+            answer = step.text || "Done.";
+            finished = true;
             break;
           }
+          answer = "";
 
-          if (decision.action === "tool" && decision.call) {
-            answer = formatAgentProgress(steps, `running ${decision.call.name}…`);
-            setSession((prev) => ({
-              ...prev,
-              messages: prev.messages.map((m) =>
-                m.id === assistantId ? { ...m, content: answer } : m,
-              ),
-            }));
+          const responses: Record<string, unknown>[] = [];
+          for (const raw of step.calls) {
+            const call =
+              workspaceFocusPath && !raw.args.path && ["read_file", "edit_file", "write_file"].includes(raw.name)
+                ? { ...raw, args: { ...raw.args, path: workspaceFocusPath } }
+                : raw;
+            const label = describeToolCall(call);
+            run = { ...run, steps: [...run.steps, { id: call.id, verb: label.verb, target: label.target, status: "running" }] };
+            show();
 
+            const writesFile = (call.name === "write_file" || call.name === "edit_file") && Boolean(call.args.path);
             let beforeWrite = "";
-            if (decision.call.name === "write_file" && decision.call.args.path) {
+            let existed = false;
+            if (writesFile) {
               try {
-                beforeWrite = (await agentReadFile(decision.call.args.path)).text;
+                beforeWrite = (await agentReadFile(call.args.path)).text;
+                existed = true;
               } catch {
                 beforeWrite = "";
               }
             }
-            const result = await runLocalAgentTool(decision.call);
-            steps.push({ call: decision.call, result });
 
-            if (decision.call.name === "write_file" && decision.call.args.path) {
+            const result = await runLocalAgentTool(call, { paths: project.paths });
+            const err = toolResultError(call, result);
+            patchStep(call.id, { status: err ? "error" : "ok", error: err ?? undefined });
+
+            if (call.name === "run_terminal") logAgentTerminal(call, result);
+
+            if (writesFile && !err) {
               try {
-                const parsed = JSON.parse(result) as { ok?: boolean; mode?: string };
-                if (parsed.ok) {
-                  const written = (await agentReadFile(decision.call.args.path)).text;
-                  setReviewDiff({
-                    path: decision.call.args.path,
-                    before: beforeWrite,
-                    after: written,
-                  });
-                  await syncWorkspaceFileAfterApply(decision.call.args.path, written);
-                  setWorkspaceFocusPath(decision.call.args.path);
-                  setPreviewOpen(true);
-                  if (workspaceDoc) setPreviewDocId(workspaceDoc.id);
-                }
+                const written = (await agentReadFile(call.args.path)).text;
+                runChanges = recordAgentChange(runChanges, { path: call.args.path, before: beforeWrite, after: written, existed });
+                const snapshot = runChanges;
+                setSession((prev) => ({ ...prev, agentChanges: snapshot }));
+                patchStep(call.id, { changedPath: call.args.path });
+                openChangeInEditor(call.args.path);
+                setFileEpoch((n) => n + 1);
               } catch {
                 /* ignore sync errors */
               }
             }
+            show();
 
-            answer = formatAgentProgress(steps);
-            setSession((prev) => ({
-              ...prev,
-              messages: prev.messages.map((m) =>
-                m.id === assistantId ? { ...m, content: answer } : m,
-              ),
-            }));
-
-            if (i === MAX_AGENT_STEPS - 1) {
-              answer = `${formatAgentProgress(steps)}\n\n---\n\nReached max tool steps. Ask again to continue.`;
-            }
-            continue;
+            responses.push({
+              functionResponse: {
+                ...(call.id.startsWith("t_") ? {} : { id: call.id }),
+                name: call.name,
+                response: { output: result },
+              },
+            });
           }
-
-          answer = typeof decision.text === "string" ? decision.text : "Agent stopped.";
-          break;
+          turns.push({ role: "user", parts: responses });
+          compactOldToolResults(turns);
         }
 
-        if (!answer.trim()) throw new Error("Empty agent answer. Try again.");
+        if (!finished) {
+          answer = `${answer ? `${answer}\n\n` : ""}_Paused after ${MAX_AGENT_STEPS} rounds — say **continue** to keep going._`;
+        }
+        run = { ...run, working: false, thinking: undefined, endedAt: Date.now() };
+        show();
+        const finalRun = run;
 
         setAskUsage(recordAsk());
         setStreak(bumpStudyActivity("ask"));
         const titled =
           next.title === "New chat" || next.title.startsWith("Chat")
-            ? question.slice(0, 48) + (question.length > 48 ? "…" : "")
+            ? displayQuestion.slice(0, 48) + (displayQuestion.length > 48 ? "…" : "")
             : next.title;
         await save({
           ...next,
           title: titled,
+          agentChanges: runChanges,
           messages: next.messages.map((m) =>
-            m.id === assistantId ? { ...m, content: answer } : m,
+            m.id === assistantId ? { ...m, content: answer, agent: finalRun } : m,
           ),
         });
         setLastQuestion(null);
@@ -1151,10 +1331,11 @@ export default function App() {
         setSession((prev) => {
           const msgs = [...prev.messages];
           const last = msgs[msgs.length - 1];
-          if (last?.role === "assistant" && last.content.trim()) {
+          if (last?.role === "assistant" && (last.content.trim() || last.agent?.steps.length)) {
             msgs[msgs.length - 1] = {
               ...last,
-              content: `${last.content.trim()}\n\n_(Stopped)_`,
+              content: `${last.content.trim()}\n\n_(Stopped)_`.trim(),
+              agent: last.agent ? { ...last.agent, working: false, thinking: undefined, endedAt: Date.now() } : undefined,
             };
           } else if (last?.role === "assistant") {
             msgs.pop();
@@ -1165,10 +1346,14 @@ export default function App() {
         });
       } else {
         setError(e instanceof Error ? e.message : "Failed");
-        await save({
-          ...session,
-          documents: currentDocs,
-          messages: [...baseMessages, um],
+        setSession((prev) => {
+          const partial = prev.messages.find((m) => m.id === assistantId);
+          const keep = partial?.agent?.steps.length
+            ? [{ ...partial, agent: { ...partial.agent, working: false, thinking: undefined, endedAt: Date.now() } }]
+            : [];
+          const failed = { ...prev, documents: currentDocs, messages: [...baseMessages, um, ...keep] };
+          void saveChat(failed);
+          return failed;
         });
       }
     } finally {
@@ -1568,22 +1753,69 @@ export default function App() {
                 pendingPatch={pendingPatch}
                 onAcceptPatch={() => void acceptPendingPatch()}
                 onRejectPatch={rejectPendingPatch}
-                fileEpoch={fileEpoch}
-                reviewDiff={reviewDiff}
-                onDismissReview={() => setReviewDiff(null)}
+                ide={ideProps}
               />
             </div>
           )}
           {/* chat column — right side once a project folder is open */}
-          <div className={ideLayout
-            ? "flex min-h-0 w-full min-w-0 flex-1 flex-col border-white/[0.06] bg-[#080d1c] lg:w-[420px] lg:min-w-[360px] lg:max-w-[440px] lg:flex-none lg:border-l"
-            : "flex min-w-0 flex-1 flex-col"}>
+          <div
+            className={ideLayout
+              ? "chat-col relative flex min-h-0 w-full min-w-0 flex-1 flex-col border-white/[0.06] bg-[#080d1c] lg:flex-none lg:border-l"
+              : "flex min-w-0 flex-1 flex-col"}
+            style={ideLayout ? ({ "--chat-w": `${chatWidth}px` } as React.CSSProperties) : undefined}
+          >
             {ideLayout && (
-              <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.06] bg-[#080d1c] px-3">
+              <Splitter
+                side="left"
+                onDrag={(dx, phase) => {
+                  if (phase === "start") chatDragStart.current = chatWidth;
+                  else setChatWidth(Math.min(760, Math.max(320, chatDragStart.current - dx)));
+                }}
+              />
+            )}
+            {ideLayout && (
+              <div className="relative flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.06] bg-[#080d1c] px-3">
                 <span className="text-[12px] font-semibold text-white">Agent</span>
-                <span className={`ml-auto text-[10px] font-semibold ${agentOnline ? "text-[#00d4aa]" : "text-amber-200"}`}>
-                  {agentOnline ? "Online" : "Offline"}
+                <span className={`text-[10px] font-semibold ${agentOnline ? "text-[#00d4aa]" : "text-amber-200"}`}>
+                  ● {agentOnline ? "Online" : "Offline"}
                 </span>
+                <div className="ml-auto flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setHistoryOpen((v) => !v)}
+                    className={`pane-btn ${historyOpen ? "is-on" : ""}`}
+                    title="Past chats in this project"
+                  >
+                    History{projectChats.length > 1 ? ` · ${projectChats.length}` : ""}
+                  </button>
+                  <button type="button" onClick={() => void newChatInProject()} className="pane-btn" title="New chat in this project">
+                    + New
+                  </button>
+                </div>
+                {historyOpen && (
+                  <>
+                    <button type="button" aria-label="Close" className="fixed inset-0 z-[60]" onClick={() => setHistoryOpen(false)} />
+                    <div className="absolute right-2 top-full z-[70] mt-1 max-h-[360px] w-[300px] overflow-auto rounded-xl border border-white/[0.12] bg-[#101828] py-1 shadow-2xl">
+                      <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-[#5a7390]">
+                        {workspaceDoc?.name} · chats
+                      </div>
+                      {projectChats.map((chat) => (
+                        <button
+                          key={chat.id}
+                          type="button"
+                          onClick={() => void openChat(chat.id)}
+                          className={`block w-full px-3 py-2 text-left hover:bg-white/[0.05] ${chat.id === session.id ? "bg-[#00d4aa]/10" : ""}`}
+                        >
+                          <div className="truncate text-[12px] text-[#e2e8f0]">{chat.title}</div>
+                          <div className="text-[10px] text-[#5a7390]">
+                            {new Date(chat.updatedAt).toLocaleString()} · {chat.messages.filter((m) => m.role === "user").length} prompts
+                            {(chat.agentChanges ?? []).length ? ` · ${(chat.agentChanges ?? []).length} file edits` : ""}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             )}
             {/* compact sources strip — uploads live in the composer (+ / link) */}
@@ -1776,6 +2008,7 @@ export default function App() {
                         canApply={hasWorkspace}
                         focusPath={workspaceFocusPath}
                         onApplied={syncWorkspaceFileAfterApply}
+                        onOpenChange={openChangeInEditor}
                         priorUserQuestion={
                           i > 0 && session.messages[i - 1]?.role === "user"
                             ? session.messages[i - 1].content
@@ -1789,6 +2022,30 @@ export default function App() {
               )}
             </div>
 
+            {ideLayout && pendingChanges.length > 0 && (
+              <div className="review-bar shrink-0">
+                <span className="text-[12px] text-[#c5d4e6]">
+                  <strong className="text-white">{pendingChanges.length}</strong> file{pendingChanges.length > 1 ? "s" : ""} changed
+                </span>
+                <button type="button" onClick={() => openChangeInEditor(pendingChanges[0].path)} className="pane-btn">
+                  Review
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void setChangeStatus(pendingChanges.map((c) => c.path), "reverted")}
+                  className="pane-btn is-danger"
+                >
+                  Reject all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void setChangeStatus(pendingChanges.map((c) => c.path), "accepted")}
+                  className="pane-btn is-primary"
+                >
+                  Accept all
+                </button>
+              </div>
+            )}
             <div className={`shrink-0 border-t border-white/[0.06] bg-[rgba(6,9,26,0.92)] backdrop-blur-xl ${ideLayout ? "px-3 py-3" : "px-3 py-3.5 sm:px-6 sm:py-4"}`}>
               <div className={`composer-dock ${ideLayout ? "is-ide" : ""}`}>
                 <div className="composer-meta">
@@ -1958,9 +2215,7 @@ export default function App() {
                 pendingPatch={pendingPatch}
                 onAcceptPatch={() => void acceptPendingPatch()}
                 onRejectPatch={rejectPendingPatch}
-                fileEpoch={fileEpoch}
-                reviewDiff={reviewDiff}
-                onDismissReview={() => setReviewDiff(null)}
+                ide={ideProps}
               />
             </aside>
           )}
@@ -1988,9 +2243,7 @@ export default function App() {
             pendingPatch={pendingPatch}
             onAcceptPatch={() => void acceptPendingPatch()}
             onRejectPatch={rejectPendingPatch}
-            fileEpoch={fileEpoch}
-            reviewDiff={reviewDiff}
-            onDismissReview={() => setReviewDiff(null)}
+            ide={ideProps}
           />
         </div>
       )}
@@ -2137,7 +2390,9 @@ function WorkspaceTree({
         <li key={node.path}>
           {node.kind === "dir" ? (
             <details open={depth < 2}>
-              <summary style={{ paddingLeft: 8 + depth * 10 }}>{node.name}</summary>
+              <summary style={{ paddingLeft: 8 + depth * 12 }}>
+                <span className="truncate">{node.name}</span>
+              </summary>
               {node.children?.length ? (
                 <WorkspaceTree
                   nodes={node.children}
@@ -2150,12 +2405,13 @@ function WorkspaceTree({
           ) : (
             <button
               type="button"
-              style={{ paddingLeft: 8 + depth * 10 }}
+              style={{ paddingLeft: 22 + depth * 12 }}
               className={`workspace-file ${focusPath === node.path ? "is-active" : ""}`}
               onClick={() => onFocusPath(node.path)}
               title={node.path}
             >
-              {node.name}
+              <FileIcon path={node.name} />
+              <span className="truncate">{node.name}</span>
             </button>
           )}
         </li>
@@ -2164,18 +2420,73 @@ function WorkspaceTree({
   );
 }
 
-function DiffLines({ lines }: { lines: ReturnType<typeof lineDiff> }) {
+type IdeProps = {
+  fileEpoch: number;
+  changes: AgentChange[];
+  reviewPath: string | null;
+  onOpenChange: (path: string) => void;
+  onCloseReview: () => void;
+  onSetChangeStatus: (paths: string[], status: AgentChange["status"]) => void;
+  onRestoreBackup: (path: string) => void;
+  onSaveFile: (path: string, text: string) => Promise<void>;
+  terminal: {
+    open: boolean;
+    entries: TerminalEntry[];
+    busy: boolean;
+    onRun: (command: string) => void;
+    onClear: () => void;
+    onToggle: () => void;
+  };
+};
+
+function ChangesList({ ide, activePath }: { ide: IdeProps; activePath: string | null }) {
+  const pending = ide.changes.filter((c) => c.status === "pending");
+  if (!pending.length) return null;
   return (
-    <div className="min-h-0 flex-1 overflow-auto font-mono text-[12px] leading-[1.55]">
-      {lines.map((line, i) => (
-        <div
-          key={`${line.type}-${i}-${line.oldNo ?? ""}-${line.newNo ?? ""}`}
-          className={line.type === "add" ? "diff-add" : line.type === "del" ? "diff-del" : "diff-same"}
-        >
-          <span className="diff-gutter">{line.type === "add" ? "+" : line.type === "del" ? "-" : " "}</span>
-          <span className="diff-text">{line.text || " "}</span>
+    <div className="changes-list shrink-0 border-b border-white/[0.06]">
+      <div className="flex h-8 items-center gap-2 px-3">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[#e8eef8]">Changes</span>
+        <span className="rounded-full bg-[#00d4aa]/15 px-1.5 text-[10px] font-semibold text-[#00d4aa]">{pending.length}</span>
+        <div className="ml-auto flex gap-1">
+          <button
+            type="button"
+            onClick={() => ide.onSetChangeStatus(pending.map((c) => c.path), "reverted")}
+            className="rounded px-1.5 py-0.5 text-[10px] font-semibold text-[#8ca3be] hover:text-red-300"
+            title="Restore every changed file to how it was before the agent"
+          >
+            Reject all
+          </button>
+          <button
+            type="button"
+            onClick={() => ide.onSetChangeStatus(pending.map((c) => c.path), "accepted")}
+            className="rounded px-1.5 py-0.5 text-[10px] font-semibold text-[#00d4aa] hover:bg-[#00d4aa]/10"
+          >
+            Accept all
+          </button>
         </div>
-      ))}
+      </div>
+      <ul className="max-h-[180px] overflow-auto pb-1">
+        {pending.map((c) => {
+          const stats = changeStats(c);
+          const active = activePath ? samePath(activePath, c.path) : false;
+          return (
+            <li key={c.path} className={`change-row ${active ? "is-active" : ""}`}>
+              <button type="button" onClick={() => ide.onOpenChange(c.path)} className="flex min-w-0 flex-1 items-center gap-2 text-left" title={c.path}>
+                <span className="truncate text-[12px] text-[#c5d4e6]">{c.path.split("/").pop()}</span>
+                {!c.existed ? <span className="text-[9px] font-bold text-[#00d4aa]">NEW</span> : null}
+                <span className="ml-auto shrink-0 font-mono text-[10px] text-[#00d4aa]">+{stats.added}</span>
+                <span className="shrink-0 font-mono text-[10px] text-red-300">-{stats.removed}</span>
+              </button>
+              <button type="button" onClick={() => ide.onSetChangeStatus([c.path], "reverted")} className="change-btn hover:text-red-300" title="Reject (restore file)">
+                ✕
+              </button>
+              <button type="button" onClick={() => ide.onSetChangeStatus([c.path], "accepted")} className="change-btn hover:text-[#00d4aa]" title="Accept">
+                ✓
+              </button>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -2187,9 +2498,7 @@ function DirectWorkspacePane({
   pendingPatch = null,
   onAcceptPatch,
   onRejectPatch,
-  fileEpoch = 0,
-  reviewDiff = null,
-  onDismissReview,
+  ide,
 }: {
   docText: string;
   focusPath?: string | null;
@@ -2197,22 +2506,30 @@ function DirectWorkspacePane({
   pendingPatch?: ProposedPatch | null;
   onAcceptPatch?: () => void;
   onRejectPatch?: () => void;
-  fileEpoch?: number;
-  reviewDiff?: { path: string; before: string; after: string } | null;
-  onDismissReview?: () => void;
+  ide?: IdeProps;
 }) {
   const meta = useMemo(() => parseDirectWorkspace(docText), [docText]);
-  const paths = useMemo(() => meta?.paths || [], [meta]);
+  const paths = useMemo(() => {
+    const base = meta?.paths || [];
+    const added = (ide?.changes || [])
+      .filter((c) => c.status !== "reverted" && !base.some((p) => samePath(p, c.path)))
+      .map((c) => c.path);
+    return added.length ? [...base, ...added] : base;
+  }, [meta, ide?.changes]);
   const tree = useMemo(() => buildWorkspaceTree(paths), [paths]);
-  const activePath = focusPath && paths.includes(focusPath) ? focusPath : paths[0] || null;
+  const activePath = focusPath && paths.some((p) => samePath(p, focusPath)) ? focusPath : paths[0] || null;
+  const fileEpoch = ide?.fileEpoch ?? 0;
   const [content, setContent] = useState("");
+  const [draft, setDraft] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [readError, setReadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activePath) {
       queueMicrotask(() => {
         setContent("");
+        setDraft(null);
         setReadError(null);
       });
       return;
@@ -2228,11 +2545,13 @@ function DirectWorkspacePane({
       .then((f) => {
         if (!alive) return;
         setContent(f.text);
+        setDraft(null);
         setLoading(false);
       })
       .catch((e) => {
         if (!alive) return;
         setContent("");
+        setDraft(null);
         setLoading(false);
         setReadError(e instanceof Error ? e.message : "Could not read file");
       });
@@ -2241,96 +2560,227 @@ function DirectWorkspacePane({
     };
   }, [activePath, fileEpoch]);
 
-  const patchForFile =
-    pendingPatch &&
-    activePath &&
-    pendingPatch.path.replace(/\\/g, "/").toLowerCase() === activePath.replace(/\\/g, "/").toLowerCase()
-      ? pendingPatch
-      : null;
+  const dirty = draft !== null && draft !== content;
+
+  async function saveDraft(text: string) {
+    if (!activePath || !ide || text === content) return;
+    setSaving(true);
+    try {
+      await ide.onSaveFile(activePath, text);
+      setContent(text);
+      setDraft(null);
+      setReadError(null);
+    } catch (e) {
+      setReadError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function focusFile(p: string) {
+    if (dirty && !window.confirm("You have unsaved edits in this file. Discard them?")) return;
+    onFocusPath?.(p);
+  }
+
+  const patchForFile = pendingPatch && activePath && samePath(pendingPatch.path, activePath) ? pendingPatch : null;
   const planned = patchForFile ? planFileEdit(content, patchForFile.text) : null;
-  const editorDiff = planned ? lineDiff(content, planned.nextText) : null;
-  const editorStats = editorDiff ? diffStats(editorDiff) : null;
+  const editorStats = planned ? diffStats(lineDiff(content, planned.nextText)) : null;
   const refuseApply = Boolean(planned?.warning && planned.nextText === content);
-  const shownReview =
-    reviewDiff &&
-    activePath &&
-    reviewDiff.path.replace(/\\/g, "/").toLowerCase() === activePath.replace(/\\/g, "/").toLowerCase()
-      ? reviewDiff
+
+  const fileChange =
+    activePath && ide
+      ? [...ide.changes].reverse().find((c) => samePath(c.path, activePath) && c.status === "pending") ?? null
       : null;
-  const reviewLines =
-    shownReview &&
-    !patchForFile &&
-    shownReview.before.split("\n").length < 2500 &&
-    shownReview.after.split("\n").length < 2500
-      ? lineDiff(shownReview.before, shownReview.after)
-      : null;
-  const reviewStats = reviewLines ? diffStats(reviewLines) : null;
-  const fileName = activePath ? activePath.split("/").pop() : "";
+  const reviewing = Boolean(fileChange && ide?.reviewPath && activePath && samePath(ide.reviewPath, activePath));
+  const reviewStats = reviewing && fileChange ? changeStats(fileChange) : null;
+  const term = ide?.terminal;
+
+  const [tabs, setTabs] = useState<string[]>([]);
+  const [recent, setRecent] = useState<string[]>([]);
+  const [sideView, setSideView] = useState<"files" | "search">("files");
+  const [sideOpen, setSideOpen] = useState(true);
+  const [sideWidth, setSideWidth] = useStoredWidth("paperpilot-ide-sidebar", 252);
+  const dragStart = useRef(0);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [reveal, setReveal] = useState<{ path: string; line: number; nonce: number } | null>(null);
+
+  useEffect(() => {
+    if (!activePath) return;
+    queueMicrotask(() => {
+      setTabs((t) => (t.some((x) => samePath(x, activePath)) ? t : [...t, activePath].slice(-12)));
+      setRecent((r) => [activePath, ...r.filter((x) => !samePath(x, activePath))].slice(0, 20));
+    });
+  }, [activePath]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const k = e.key.toLowerCase();
+      if (k === "p" && !e.shiftKey) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setQuickOpen(true);
+      } else if (k === "b") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setSideOpen((v) => !v);
+      } else if (k === "f" && e.shiftKey) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setSideOpen(true);
+        setSideView("search");
+      }
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  function closeTab(p: string) {
+    const idx = tabs.findIndex((x) => samePath(x, p));
+    const rest = tabs.filter((x) => !samePath(x, p));
+    setTabs(rest);
+    if (activePath && samePath(activePath, p) && rest.length) focusFile(rest[Math.min(idx, rest.length - 1)]);
+  }
+
+  function openAtLine(p: string, line: number) {
+    setReveal({ path: p, line, nonce: Date.now() });
+    if (!activePath || !samePath(activePath, p)) focusFile(p);
+  }
+
+  const crumbs = activePath ? activePath.split("/") : [];
 
   return (
     <div className="flex min-h-0 flex-1">
-      <div className="flex h-full min-h-0 w-[252px] shrink-0 flex-col border-r border-white/[0.06] bg-[#080d1c]">
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-white/[0.06] px-3">
-          <span className="min-w-0 truncate text-[12px] font-semibold uppercase tracking-[0.08em] text-[#e8eef8]">
-            {meta?.name || "Project"}
-          </span>
-          <span className="ml-auto shrink-0 text-[10px] text-[#5a7390]">{paths.length}</span>
-        </div>
-        <div className="workspace-pane min-h-0 flex-1 overflow-auto py-1">
-          <WorkspaceTree
-            nodes={tree}
-            focusPath={activePath}
-            onFocusPath={(p) => onFocusPath?.(p)}
-          />
-        </div>
-      </div>
-      <div className="flex min-w-0 flex-1 flex-col bg-[#0b1127]">
-        <div className="flex h-9 shrink-0 items-center border-b border-white/[0.06] bg-[#080d1c]">
-          {fileName ? (
+      {sideOpen && (
+        <div className="relative flex h-full min-h-0 shrink-0 flex-col border-r border-white/[0.06] bg-[#080d1c]" style={{ width: sideWidth }}>
+          <div className="flex h-9 shrink-0 items-center gap-1 border-b border-white/[0.06] px-2">
+            <button type="button" onClick={() => setSideView("files")} className={`side-tab ${sideView === "files" ? "is-on" : ""}`}>
+              Explorer
+            </button>
+            <button type="button" onClick={() => setSideView("search")} className={`side-tab ${sideView === "search" ? "is-on" : ""}`} title="Ctrl+Shift+F">
+              Search
+            </button>
+            <button type="button" onClick={() => setQuickOpen(true)} className="side-tab ml-auto" title="Go to file (Ctrl+P)">
+              ⌕
+            </button>
+          </div>
+          {sideView === "files" ? (
             <>
-              <div className="flex h-9 min-w-0 max-w-[320px] items-center gap-2 border-r border-white/[0.08] bg-[#0b1127] px-3 text-[12px] text-white">
-                <span className="truncate font-medium">{fileName}</span>
-                {shownReview ? <span className="shrink-0 text-[10px] font-semibold text-[#00d4aa]">edited</span> : null}
+              <div className="flex h-7 shrink-0 items-center gap-2 px-3">
+                <span className="min-w-0 truncate text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8ca3be]">
+                  {meta?.name || "Project"}
+                </span>
+                <span className="ml-auto shrink-0 text-[10px] text-[#5a7390]">{paths.length}</span>
               </div>
-              <div className="min-w-0 flex-1 truncate px-3 text-[11px] text-[#5a7390]" title={activePath || ""}>
-                {activePath}
+              {ide ? <ChangesList ide={ide} activePath={activePath} /> : null}
+              <div className="workspace-pane min-h-0 flex-1 overflow-auto pb-2">
+                <WorkspaceTree nodes={tree} focusPath={activePath} onFocusPath={focusFile} />
               </div>
             </>
           ) : (
-            <div className="px-3 py-2 text-[12px] text-[#415570]">Select a file</div>
+            <SearchPanel onOpen={openAtLine} />
           )}
+          <Splitter
+            onDrag={(dx, phase) => {
+              if (phase === "start") dragStart.current = sideWidth;
+              else setSideWidth(Math.min(520, Math.max(180, dragStart.current + dx)));
+            }}
+          />
+        </div>
+      )}
+      <div className="flex min-w-0 flex-1 flex-col bg-[#0b1127]">
+        <div className="flex h-9 shrink-0 items-stretch border-b border-white/[0.06] bg-[#080d1c]">
+          <button
+            type="button"
+            onClick={() => setSideOpen((v) => !v)}
+            className="flex w-8 shrink-0 items-center justify-center border-r border-white/[0.06] text-[13px] text-[#5a7390] hover:text-white"
+            title="Toggle sidebar (Ctrl+B)"
+          >
+            {sideOpen ? "⟨" : "⟩"}
+          </button>
+          <div className="editor-tabs min-w-0 flex-1">
+            {tabs.length === 0 ? <div className="px-3 py-2 text-[12px] text-[#415570]">Select a file · Ctrl+P to search</div> : null}
+            {tabs.map((t) => {
+              const active = activePath ? samePath(t, activePath) : false;
+              const edited = ide?.changes.some((c) => c.status === "pending" && samePath(c.path, t));
+              return (
+                <div key={t} className={`editor-tab ${active ? "is-active" : ""}`} title={t}>
+                  <button type="button" className="flex min-w-0 items-center gap-1.5" onClick={() => focusFile(t)}>
+                    <FileIcon path={t} />
+                    <span className="truncate">{t.split("/").pop()}</span>
+                    {edited ? <span className="text-[9px] font-bold text-[#00d4aa]">M</span> : null}
+                  </button>
+                  {active && dirty ? (
+                    <span className="editor-tab-dot" title="Unsaved" />
+                  ) : (
+                    <button type="button" className="editor-tab-close" onClick={() => closeTab(t)} title="Close">
+                      ×
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
           <div className="ml-auto flex shrink-0 items-center gap-1.5 px-2">
             {loading ? <span className="text-[10px] text-[#415570]">reading…</span> : null}
-            {shownReview && (
-              <button
-                type="button"
-                onClick={onDismissReview}
-                className="rounded-md border border-white/15 px-2 py-0.5 text-[10px] font-semibold text-[#8ca3be] hover:text-white"
-              >
-                Show saved file
+            {saving ? <span className="text-[10px] text-[#415570]">saving…</span> : null}
+            {dirty && !patchForFile && !reviewing ? (
+              <button type="button" onClick={() => void saveDraft(draft ?? content)} className="pane-btn is-primary" title="Ctrl+S">
+                Save
               </button>
-            )}
-            {patchForFile && (
+            ) : null}
+            {fileChange && !reviewing && !patchForFile && activePath ? (
+              <button type="button" onClick={() => ide?.onOpenChange(activePath)} className="pane-btn">
+                Review change
+              </button>
+            ) : null}
+            {reviewing && fileChange ? (
               <>
-                <button
-                  type="button"
-                  onClick={onRejectPatch}
-                  className="rounded-md border border-white/15 px-2 py-0.5 text-[10px] font-semibold text-[#8ca3be] hover:text-white"
-                >
+                <button type="button" onClick={ide?.onCloseReview} className="pane-btn">
+                  Edit file
+                </button>
+                <button type="button" onClick={() => ide?.onSetChangeStatus([fileChange.path], "reverted")} className="pane-btn is-danger">
                   Reject
                 </button>
-                <button
-                  type="button"
-                  onClick={onAcceptPatch}
-                  disabled={refuseApply}
-                  className="rounded-md border border-[#00d4aa]/40 bg-[#00d4aa]/15 px-2 py-0.5 text-[10px] font-semibold text-[#00d4aa] disabled:opacity-40"
-                >
+                <button type="button" onClick={() => ide?.onSetChangeStatus([fileChange.path], "accepted")} className="pane-btn is-primary">
+                  Accept
+                </button>
+              </>
+            ) : null}
+            {patchForFile && (
+              <>
+                <button type="button" onClick={onRejectPatch} className="pane-btn">
+                  Reject
+                </button>
+                <button type="button" onClick={onAcceptPatch} disabled={refuseApply} className="pane-btn is-primary disabled:opacity-40">
                   Accept
                 </button>
               </>
             )}
+            {activePath && ide && !reviewing && !patchForFile ? (
+              <button type="button" onClick={() => ide.onRestoreBackup(activePath)} className="pane-btn" title="Restore the .ppbak copy made before the last save">
+                Undo save
+              </button>
+            ) : null}
+            {term ? (
+              <button type="button" onClick={term.onToggle} className={`pane-btn ${term.open ? "is-on" : ""}`} title="Toggle terminal">
+                Terminal
+              </button>
+            ) : null}
           </div>
         </div>
+        {crumbs.length > 0 && (
+          <div className="flex h-6 shrink-0 items-center gap-1 border-b border-white/[0.04] px-3 text-[11px] text-[#5a7390]">
+            {crumbs.map((c, i) => (
+              <span key={`${c}-${i}`} className="flex items-center gap-1">
+                {i > 0 ? <span className="text-[#33445c]">›</span> : null}
+                <span className={i === crumbs.length - 1 ? "text-[#c5d4e6]" : ""}>{c}</span>
+              </span>
+            ))}
+            {dirty ? <span className="ml-2 text-[10px] text-amber-200">unsaved · Ctrl+S</span> : null}
+          </div>
+        )}
         {readError ? (
           <div className="border-b border-red-400/25 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">{readError}</div>
         ) : null}
@@ -2339,37 +2789,69 @@ function DirectWorkspacePane({
             {planned.warning}
           </div>
         ) : null}
-        {patchForFile && editorDiff && editorStats ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex gap-2 border-b border-white/[0.06] px-3 py-1.5 text-[10px] text-[#8ca3be]">
-              <span className="font-semibold text-white">
-                {planned?.mode === "snippet-merge"
-                  ? "Merged snippet diff"
-                  : planned?.mode === "search-replace"
-                    ? "Search/replace diff"
-                    : "Inline diff"}
-              </span>
-              <span className="text-[#00d4aa]">+{editorStats.added}</span>
-              <span className="text-red-300">-{editorStats.removed}</span>
+        <div className="flex min-h-0 flex-1 flex-col">
+          {patchForFile && planned && editorStats && activePath ? (
+            <>
+              <div className="flex gap-2 border-b border-white/[0.06] px-3 py-1.5 text-[10px] text-[#8ca3be]">
+                <span className="font-semibold text-white">
+                  {planned.mode === "snippet-merge" ? "Merged snippet" : planned.mode === "search-replace" ? "Search/replace" : "Proposed edit"}
+                </span>
+                <span className="text-[#00d4aa]">+{editorStats.added}</span>
+                <span className="text-red-300">-{editorStats.removed}</span>
+              </div>
+              <div className="min-h-0 flex-1">
+                <CodeDiff path={activePath} original={content} modified={planned.nextText} />
+              </div>
+            </>
+          ) : reviewing && fileChange && reviewStats ? (
+            <>
+              <div className="flex gap-2 border-b border-white/[0.06] px-3 py-1.5 text-[10px] text-[#8ca3be]">
+                <span className="font-semibold text-white">Agent change</span>
+                <span className="text-[#00d4aa]">+{reviewStats.added}</span>
+                <span className="text-red-300">-{reviewStats.removed}</span>
+                <span className="truncate text-[#415570]">already saved to disk · Reject restores the original</span>
+              </div>
+              <div className="min-h-0 flex-1">
+                <CodeDiff path={fileChange.path} original={fileChange.before} modified={fileChange.after} />
+              </div>
+            </>
+          ) : activePath && !loading ? (
+            <div className="min-h-0 flex-1">
+              <CodeEditor
+                path={activePath}
+                value={draft ?? content}
+                onChange={(next) => setDraft(next)}
+                onSave={(text) => void saveDraft(text)}
+                revealLine={reveal && samePath(reveal.path, activePath) ? { line: reveal.line, nonce: reveal.nonce } : null}
+              />
             </div>
-            <DiffLines lines={editorDiff} />
+          ) : (
+            <div className="p-3 font-mono text-[11px] text-[#415570]">{loading ? "Reading from disk…" : "No file selected"}</div>
+          )}
+        </div>
+        {term?.open ? (
+          <div className="h-[220px] shrink-0 border-t border-white/[0.08] bg-[#070b18]">
+            <TerminalPanel
+              entries={term.entries}
+              busy={term.busy}
+              onRun={term.onRun}
+              onClear={term.onClear}
+              onClose={term.onToggle}
+            />
           </div>
-        ) : reviewLines && reviewStats ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex gap-2 border-b border-white/[0.06] px-3 py-1.5 text-[10px] text-[#8ca3be]">
-              <span className="font-semibold text-white">Agent change</span>
-              <span className="text-[#00d4aa]">+{reviewStats.added}</span>
-              <span className="text-red-300">-{reviewStats.removed}</span>
-              <span className="truncate text-[#415570]">{shownReview?.path}</span>
-            </div>
-            <DiffLines lines={reviewLines} />
-          </div>
-        ) : (
-          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre bg-[#0b1127] p-3 font-mono text-[11px] leading-relaxed text-[#c5d4e6]">
-            {loading ? "Reading from disk…" : content.slice(0, 40000) || "No content"}
-          </pre>
-        )}
+        ) : null}
       </div>
+      {quickOpen && (
+        <QuickOpen
+          paths={paths}
+          recent={recent}
+          onOpen={(p) => {
+            setQuickOpen(false);
+            focusFile(p);
+          }}
+          onClose={() => setQuickOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -2383,9 +2865,7 @@ function PreviewBody({
   pendingPatch = null,
   onAcceptPatch,
   onRejectPatch,
-  fileEpoch = 0,
-  reviewDiff = null,
-  onDismissReview,
+  ide,
 }: {
   doc: DocumentMeta;
   url: string | null;
@@ -2395,9 +2875,7 @@ function PreviewBody({
   pendingPatch?: ProposedPatch | null;
   onAcceptPatch?: () => void;
   onRejectPatch?: () => void;
-  fileEpoch?: number;
-  reviewDiff?: { path: string; before: string; after: string } | null;
-  onDismissReview?: () => void;
+  ide?: IdeProps;
 }) {
   if (doc.kind === "image" && url) {
     return (
@@ -2415,9 +2893,7 @@ function PreviewBody({
         pendingPatch={pendingPatch}
         onAcceptPatch={onAcceptPatch}
         onRejectPatch={onRejectPatch}
-        fileEpoch={fileEpoch}
-        reviewDiff={reviewDiff}
-        onDismissReview={onDismissReview}
+        ide={ide}
       />
     );
   }
@@ -2836,6 +3312,7 @@ function Bubble({
   canApply,
   focusPath,
   onApplied,
+  onOpenChange,
 }: {
   msg: Message;
   idx: number;
@@ -2856,6 +3333,7 @@ function Bubble({
   canApply?: boolean;
   focusPath?: string | null;
   onApplied?: (path: string, text: string) => void | Promise<void>;
+  onOpenChange?: (path: string) => void;
 }) {
   const user = msg.role === "user";
   if (user) {
@@ -2890,6 +3368,14 @@ function Bubble({
             </>
           )}
         </div>
+      </div>
+    );
+  }
+
+  if (msg.agent) {
+    return (
+      <div className="animate-rise" style={{ animationDelay: `${Math.min(idx * 0.04, 0.2)}s` }}>
+        <AgentReply run={msg.agent} answer={msg.content} onOpenFile={onOpenChange} />
       </div>
     );
   }

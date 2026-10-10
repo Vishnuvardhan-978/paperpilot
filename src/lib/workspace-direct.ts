@@ -44,6 +44,11 @@ export function parseDirectWorkspace(text: string): {
   return { root, name, paths };
 }
 
+export function directWorkspaceRoot(text: string | null | undefined): string | null {
+  if (!isDirectWorkspaceText(text)) return null;
+  return text!.match(/^root:\s*(.+)$/m)?.[1].trim() || null;
+}
+
 export function directWorkspaceHint(text: string) {
   const meta = parseDirectWorkspace(text);
   if (!meta) return text;

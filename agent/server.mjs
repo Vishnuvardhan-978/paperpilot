@@ -30,8 +30,8 @@ const SKIP_DIRS = new Set([
   ".venv",
   "venv",
 ]);
-const MAX_SEARCH_FILES = 400;
-const MAX_SEARCH_HITS = 40;
+const MAX_SEARCH_FILES = 5000;
+const MAX_SEARCH_HITS = 120;
 const MAX_TREE_FILES = 2500;
 const MAX_EXEC_MS = Number(process.env.PAPERPILOT_EXEC_MS || 45000);
 const MAX_EXEC_OUT = 80_000;
@@ -112,7 +112,7 @@ function walkFiles(dir, acc = []) {
     if (d.isDirectory()) {
       if (SKIP_DIRS.has(d.name)) continue;
       walkFiles(path.join(dir, d.name), acc);
-    } else if (d.isFile()) {
+    } else if (d.isFile() && !d.name.endsWith(".ppbak")) {
       acc.push(path.join(dir, d.name));
     }
   }
@@ -137,6 +137,7 @@ function walkTreePaths(dir, acc = [], depth = 0) {
       walkTreePaths(path.join(dir, d.name), acc, depth + 1);
     } else if (d.isFile()) {
       if (d.name.startsWith(".") && d.name !== ".env.example" && d.name !== ".gitignore") continue;
+      if (d.name.endsWith(".ppbak")) continue;
       const full = path.join(dir, d.name);
       let rel = path.relative(ROOT, full).replace(/\\/g, "/");
       const base = path.basename(ROOT);
@@ -153,13 +154,26 @@ function walkTreePaths(dir, acc = [], depth = 0) {
   return acc;
 }
 
-function runSearch(query, relRoot = ".") {
+const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|zip|jar|war|ear|class|exe|dll|so|woff2?|ttf|eot|mp[34]|mov|lock|traineddata)$/i;
+
+function runSearch(query, relRoot = ".", opts = {}) {
   const q = String(query || "").trim();
   if (!q || q.length < 2) throw new Error("query too short");
   const start = safeJoin(relRoot === "." ? "" : relRoot);
-  const files = walkFiles(fs.statSync(start).isDirectory() ? start : path.dirname(start));
+  const files = walkFiles(fs.statSync(start).isDirectory() ? start : path.dirname(start)).filter(
+    (f) => !BINARY_EXT.test(f),
+  );
   const hits = [];
-  const lower = q.toLowerCase();
+  let re = null;
+  if (opts.regex) {
+    try {
+      re = new RegExp(q, opts.caseSensitive ? "" : "i");
+    } catch (e) {
+      throw new Error(`Bad regex: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  const needle = opts.caseSensitive ? q : q.toLowerCase();
+  const matches = (line) => (re ? re.test(line) : (opts.caseSensitive ? line : line.toLowerCase()).includes(needle));
   for (const full of files) {
     if (hits.length >= MAX_SEARCH_HITS) break;
     let text;
@@ -173,7 +187,7 @@ function runSearch(query, relRoot = ".") {
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       if (hits.length >= MAX_SEARCH_HITS) break;
-      if (lines[i].toLowerCase().includes(lower)) {
+      if (matches(lines[i])) {
         hits.push({
           path: path.relative(ROOT, full).replace(/\\/g, "/"),
           line: i + 1,
@@ -335,7 +349,7 @@ const server = http.createServer(async (req, res) => {
         name: "PaperPilot Local Agent",
         workspace: ROOT,
         phase: 2,
-        capabilities: ["read", "write", "list", "search", "exec", "tree", "workspace", "pick-folder"],
+        capabilities: ["read", "write", "list", "search", "exec", "tree", "workspace", "pick-folder", "restore", "delete"],
       });
       return;
     }
@@ -427,7 +441,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/search") {
       const query = url.searchParams.get("q") || "";
       const rel = url.searchParams.get("path") || ".";
-      const result = runSearch(query, rel);
+      const result = runSearch(query, rel, {
+        regex: url.searchParams.get("regex") === "1",
+        caseSensitive: url.searchParams.get("case") === "1",
+      });
       send(res, 200, result);
       return;
     }
@@ -441,9 +458,9 @@ const server = http.createServer(async (req, res) => {
       const full = resolveInsideRoot(body.path);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       let backup = null;
-      if (fs.existsSync(full)) {
-        backup = `${body.path}.ppbak`;
-        fs.copyFileSync(full, safeJoin(backup));
+      if (fs.existsSync(full) && body.backup !== false) {
+        backup = `${path.relative(ROOT, full).replace(/\\/g, "/")}.ppbak`;
+        fs.copyFileSync(full, `${full}.ppbak`);
       }
       fs.writeFileSync(full, body.text, "utf8");
       send(res, 200, {
@@ -452,6 +469,43 @@ const server = http.createServer(async (req, res) => {
         bytes: Buffer.byteLength(body.text),
         backup,
       });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/restore") {
+      const body = await readBody(req);
+      if (!body.path) {
+        send(res, 400, { error: "path required" });
+        return;
+      }
+      const full = resolveInsideRoot(body.path);
+      const bak = `${full}.ppbak`;
+      if (!fs.existsSync(bak)) {
+        send(res, 404, { error: "No backup (.ppbak) for this file" });
+        return;
+      }
+      fs.copyFileSync(bak, full);
+      fs.unlinkSync(bak);
+      send(res, 200, { ok: true, path: body.path, text: fs.readFileSync(full, "utf8") });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/delete") {
+      const body = await readBody(req);
+      if (!body.path) {
+        send(res, 400, { error: "path required" });
+        return;
+      }
+      const full = resolveInsideRoot(body.path);
+      if (fs.existsSync(full)) {
+        if (!fs.statSync(full).isFile()) {
+          send(res, 400, { error: "Only files can be deleted" });
+          return;
+        }
+        fs.unlinkSync(full);
+      }
+      if (fs.existsSync(`${full}.ppbak`)) fs.unlinkSync(`${full}.ppbak`);
+      send(res, 200, { ok: true, path: body.path });
       return;
     }
 

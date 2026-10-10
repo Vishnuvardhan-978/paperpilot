@@ -35,6 +35,8 @@ Health: http://127.0.0.1:8787/health
 | `GET /list` `GET /read` `POST /write` | Files |
 | `GET /search` | Text search |
 | `POST /exec` | Terminal under workspace |
+| `POST /restore` | Copy `<file>.ppbak` back over the file (undo last save) |
+| `POST /delete` | Delete a file inside the workspace (used to reject new files) |
 
 ## Next
 

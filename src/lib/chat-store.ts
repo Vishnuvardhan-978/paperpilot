@@ -1,9 +1,32 @@
 import type { DocKind } from "@/lib/media";
+import type { AgentChange } from "@/lib/agent-changes";
+
+export type AgentStepView = {
+  id: string;
+  verb: string;
+  target: string;
+  status: "running" | "ok" | "error";
+  error?: string;
+  /** File this step wrote, so the chat can link to its diff. */
+  changedPath?: string;
+};
+
+export type AgentRunView = {
+  steps: AgentStepView[];
+  /** Latest thinking summary from the model (shown while working). */
+  thinking?: string;
+  working: boolean;
+  model?: string;
+  startedAt: number;
+  endedAt?: number;
+};
 
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Present on coding-agent replies: the tool steps behind the answer. */
+  agent?: AgentRunView;
 };
 
 export type DocumentMeta = {
@@ -34,6 +57,8 @@ export type ChatSession = {
   document?: DocumentMeta | null;
   documents: DocumentMeta[];
   messages: Message[];
+  /** Files the coding agent wrote in this chat (review / undo). */
+  agentChanges?: AgentChange[];
 };
 
 const DB_NAME = "paperpilot";

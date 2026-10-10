@@ -174,6 +174,116 @@ export async function generateTextOnce(input: string | ContentPart[]): Promise<s
     : new Error("Gemini is busy. Please try again in a moment.");
 }
 
+/** Coding agent: strongest first; missing models are skipped. Override with GEMINI_AGENT_MODEL. */
+function agentModelCandidates() {
+  const preferred = process.env.GEMINI_AGENT_MODEL?.trim();
+  const list = ["gemini-pro-latest", "gemini-2.5-pro", "gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash"];
+  return preferred ? [preferred, ...list.filter((m) => m !== preferred)] : list;
+}
+
+/** Models this API key can't use right now (missing / no quota) → skip until the timestamp. */
+const unavailableAgentModels = new Map<string, number>();
+
+export type AgentContent = { role: "user" | "model"; parts: Record<string, unknown>[] };
+
+export type AgentStreamEvent =
+  | { type: "thought"; text: string }
+  | { type: "text"; text: string }
+  | { type: "reset" }
+  | { type: "done"; model: string; parts: Record<string, unknown>[] };
+
+/**
+ * One agent turn with native function calling. The model's parts (including
+ * thoughtSignature on function calls) must be sent back verbatim on the next turn,
+ * and the same model must be used for the whole run.
+ */
+export async function* streamAgentTurn(opts: {
+  contents: AgentContent[];
+  systemInstruction: string;
+  functionDeclarations: Record<string, unknown>[];
+  model?: string | null;
+}): AsyncGenerator<AgentStreamEvent> {
+  const ai = getClient();
+  const now = Date.now();
+  const all = opts.model ? [opts.model] : agentModelCandidates();
+  const candidates = all.filter((m) => (unavailableAgentModels.get(m) ?? 0) < now);
+  if (!candidates.length) candidates.push(...all);
+  let lastError: unknown;
+
+  for (const modelName of candidates) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const parts: Record<string, unknown>[] = [];
+      let yielded = false;
+      try {
+        const stream = await ai.models.generateContentStream({
+          model: modelName,
+          contents: opts.contents as never,
+          config: {
+            systemInstruction: opts.systemInstruction,
+            tools: [{ functionDeclarations: opts.functionDeclarations as never }],
+            thinkingConfig: { includeThoughts: true },
+            temperature: 0.2,
+          },
+        });
+        for await (const chunk of stream) {
+          for (const part of (chunk.candidates?.[0]?.content?.parts ?? []) as Record<string, unknown>[]) {
+            parts.push(part);
+            if (typeof part.text === "string" && part.text) {
+              yielded = true;
+              yield { type: part.thought ? "thought" : "text", text: part.text };
+            } else if (part.functionCall) {
+              yielded = true;
+            }
+          }
+        }
+        if (!parts.length) throw new Error("Empty response from Gemini");
+        yield { type: "done", model: modelName, parts: mergeTextParts(parts) };
+        return;
+      } catch (error) {
+        lastError = error;
+        if (yielded) yield { type: "reset" };
+        const notOnThisKey = /not found|404|permission|quota|limit: 0/i.test(errorMessage(error));
+        if (isRetryable(error) && attempt < 2 && !notOnThisKey) {
+          await sleep(900 * attempt);
+          continue;
+        }
+        if (isRetryable(error) || isModelSkip(error)) {
+          if (!opts.model && notOnThisKey) {
+            unavailableAgentModels.set(modelName, Date.now() + 10 * 60_000);
+            console.warn(`agent: skipping ${modelName} for 10 min — ${errorMessage(error).slice(0, 160)}`);
+          }
+          break;
+        }
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Gemini is busy. Please try again in a moment.");
+}
+
+/** Streaming splits text into many tiny parts; join neighbours of the same kind (keeps signatures). */
+function mergeTextParts(parts: Record<string, unknown>[]) {
+  const out: Record<string, unknown>[] = [];
+  for (const part of parts) {
+    const prev = out[out.length - 1];
+    const isPlainText = typeof part.text === "string" && !part.functionCall && !part.thoughtSignature;
+    if (
+      isPlainText &&
+      prev &&
+      typeof prev.text === "string" &&
+      !prev.functionCall &&
+      !prev.thoughtSignature &&
+      Boolean(prev.thought) === Boolean(part.thought)
+    ) {
+      out[out.length - 1] = { ...prev, text: `${prev.text}${part.text}` };
+    } else {
+      out.push(part);
+    }
+  }
+  return out;
+}
+
 const OCR_PROMPT = (fileName: string) =>
   `You are extracting content for a document Q&A app.
 File name: ${fileName}
