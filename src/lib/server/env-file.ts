@@ -22,7 +22,7 @@ export type SettingsKey = (typeof SETTINGS_KEYS)[number]["key"];
 const ALLOWED = new Set<string>(SETTINGS_KEYS.map((k) => k.key));
 
 export function envFilePath() {
-  return process.env.PAPERPILOT_ENV_FILE || path.join(process.cwd(), ".env.local");
+  return process.env.PAPERPILOT_ENV_FILE || path.join(/*turbopackIgnore: true*/ process.cwd(), ".env.local");
 }
 
 function quote(value: string) {
@@ -34,7 +34,7 @@ export async function writeEnvValues(values: Partial<Record<string, string>>) {
   const file = envFilePath();
   let lines: string[] = [];
   try {
-    lines = (await fs.readFile(file, "utf8")).split(/\r?\n/);
+    lines = (await fs.readFile(/*turbopackIgnore: true*/ file, "utf8")).split(/\r?\n/);
   } catch {
     /* new file */
   }
@@ -53,7 +53,7 @@ export async function writeEnvValues(values: Partial<Record<string, string>>) {
     }
   }
   while (lines.length && lines[lines.length - 1] === "") lines.pop();
-  await fs.writeFile(file, `${lines.join("\n")}\n`, "utf8");
+  await fs.writeFile(/*turbopackIgnore: true*/ file, `${lines.join("\n")}\n`, "utf8");
 }
 
 export function maskedSettings() {
