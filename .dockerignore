@@ -1,0 +1,13 @@
+node_modules
+.next
+release
+e2e-results
+training
+public/monaco
+COMMON
+Library
+eng.traineddata
+.env*
+!.env.example
+.git
+*.ppbak

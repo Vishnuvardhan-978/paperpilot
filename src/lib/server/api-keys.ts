@@ -14,6 +14,8 @@ export type ApiKeyRecord = {
   hash: string;
   /** Requests allowed per UTC day. */
   dailyRequests: number;
+  /** Burst limit per rolling minute (default 30). */
+  perMinute?: number;
   disabled?: boolean;
   createdAt: string;
 };
@@ -84,6 +86,21 @@ function scheduleFlush() {
     flushTimer = null;
     flush().catch((e) => console.error("usage flush failed", e));
   }, 2_000);
+}
+
+const recent = new Map<string, number[]>();
+
+/** Rolling one-minute window per key, in memory. Returns seconds to wait, or 0. */
+export function burstWait(key: ApiKeyRecord, now = Date.now()): number {
+  const limit = key.perMinute ?? 30;
+  const hits = (recent.get(key.id) || []).filter((t) => now - t < 60_000);
+  if (hits.length >= limit) {
+    recent.set(key.id, hits);
+    return Math.max(1, Math.ceil((hits[0] + 60_000 - now) / 1000));
+  }
+  hits.push(now);
+  recent.set(key.id, hits);
+  return 0;
 }
 
 /** Counts one request; false when today's allowance is used up. */

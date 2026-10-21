@@ -13,6 +13,7 @@ import http from "http";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+import { checkForUpdates } from "./updater.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGED = app.isPackaged;
@@ -23,6 +24,41 @@ const APP_HOST = PACKAGED ? "127.0.0.1" : "localhost";
 const APP_URL = `http://${APP_HOST}:${APP_PORT}/app`;
 const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
 const LOG_DIR = path.join(app.getPath("userData"), "logs");
+/** Keys saved from the in-app Settings page; survives reinstalls, unlike resources/server. */
+const KEYS_FILE = path.join(app.getPath("userData"), "keys.env");
+/** Written by scripts/build-desktop.mjs when PAPERPILOT_UPDATE_URL is set. */
+const UPDATE_FILE = path.join(HERE, "update.json");
+
+function readKeysFile() {
+  const env = {};
+  try {
+    for (const line of fs.readFileSync(KEYS_FILE, "utf8").split(/\r?\n/)) {
+      const m = /^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/.exec(line);
+      if (!m) continue;
+      let value = m[2].trim();
+      if (value.startsWith('"')) {
+        try {
+          value = JSON.parse(value);
+        } catch {
+          /* keep raw */
+        }
+      }
+      env[m[1]] = value;
+    }
+  } catch {
+    /* no keys saved yet */
+  }
+  return env;
+}
+
+function updateFeedUrl() {
+  if (process.env.PAPERPILOT_UPDATE_URL) return process.env.PAPERPILOT_UPDATE_URL;
+  try {
+    return JSON.parse(fs.readFileSync(UPDATE_FILE, "utf8")).url || "";
+  } catch {
+    return "";
+  }
+}
 const children = [];
 
 function ping(url) {
@@ -93,7 +129,9 @@ async function ensureServices(settings) {
         env: {
           PORT: String(APP_PORT),
           HOSTNAME: APP_HOST,
-          GEMINI_API_KEY: settings.geminiApiKey || "",
+          PAPERPILOT_ENV_FILE: KEYS_FILE,
+          ...readKeysFile(),
+          GEMINI_API_KEY: readKeysFile().GEMINI_API_KEY || settings.geminiApiKey || "",
           ...(settings.geminiAgentModel ? { GEMINI_AGENT_MODEL: settings.geminiAgentModel } : {}),
         },
       });
@@ -109,7 +147,7 @@ async function ensureServices(settings) {
 /** First launch of the installed app: ask for the user's own Gemini key (never bundled). */
 async function ensureSettings(win) {
   const settings = readSettings();
-  if (!PACKAGED || settings.geminiApiKey) return settings;
+  if (!PACKAGED || settings.geminiApiKey || readKeysFile().GEMINI_API_KEY) return settings;
   const saved = new Promise((resolve) => {
     ipcMain.handleOnce("paperpilot:save-settings", (_event, input) => {
       const next = {
@@ -189,6 +227,17 @@ async function createWindow() {
   const ok = await ensureServices(settings);
   if (ok) {
     await win.loadURL(APP_URL);
+    setTimeout(() => {
+      const log = (msg) => {
+        try {
+          fs.mkdirSync(LOG_DIR, { recursive: true });
+          fs.appendFileSync(path.join(LOG_DIR, "updater.log"), `${new Date().toISOString()} ${msg}\n`);
+        } catch {
+          /* ignore */
+        }
+      };
+      void checkForUpdates({ win, feedUrl: updateFeedUrl(), log, onBeforeInstall: stopChildren });
+    }, 8_000);
   } else {
     const where = PACKAGED ? `See the logs in ${LOG_DIR}` : "Check the terminal output.";
     await win.loadURL(

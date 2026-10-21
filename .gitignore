@@ -55,3 +55,4 @@ Library/
 /training/**/data/
 /training/**/out*/
 __pycache__/
+/electron/update.json

@@ -1,7 +1,7 @@
 /**
  * Manage PaperPilot API keys for the PaperPilot AI server (/api/v1).
  *
- *   node scripts/pp-keys.mjs create "Ravi's laptop" [--daily 200] [--test]
+ *   node scripts/pp-keys.mjs create "Ravi's laptop" [--daily 200] [--per-minute 30] [--test]
  *   node scripts/pp-keys.mjs list
  *   node scripts/pp-keys.mjs usage [YYYY-MM-DD]
  *   node scripts/pp-keys.mjs disable <id> | enable <id> | delete <id>
@@ -43,17 +43,20 @@ switch (cmd) {
     if (!arg) throw new Error('Give the key a name: create "Ravi\'s laptop"');
     const daily = Number(flag("--daily", "200"));
     if (!Number.isInteger(daily) || daily < 1) throw new Error("--daily must be a positive whole number");
+    const perMinute = Number(flag("--per-minute", "30"));
+    if (!Number.isInteger(perMinute) || perMinute < 1) throw new Error("--per-minute must be a positive whole number");
     const raw = `pp_${process.argv.includes("--test") ? "test" : "live"}_${token(40)}`;
     const record = {
       id: `key_${token(10)}`,
       name: arg,
       hash: createHash("sha256").update(raw).digest("hex"),
       dailyRequests: daily,
+      perMinute,
       createdAt: new Date().toISOString(),
     };
     data.keys.push(record);
     save(data);
-    console.log(`Created ${record.id} "${arg}" (${daily} requests/day)\n\n  ${raw}\n\nCopy it now — it can't be shown again.`);
+    console.log(`Created ${record.id} "${arg}" (${daily} requests/day, ${perMinute}/minute)\n\n  ${raw}\n\nCopy it now — it can't be shown again.`);
     break;
   }
   case "list": {

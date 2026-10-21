@@ -4,7 +4,7 @@
  * "paperpilot" itself), falling through on quota / outage / missing model.
  */
 import { compatProvider, modelsFor, providerOrder, type CompatProviderId } from "@/lib/ai/providers";
-import { addTokens, findKey, secondsUntilUtcMidnight, takeRequest, type ApiKeyRecord } from "@/lib/server/api-keys";
+import { addTokens, burstWait, findKey, secondsUntilUtcMidnight, takeRequest, type ApiKeyRecord } from "@/lib/server/api-keys";
 
 export function apiError(status: number, message: string, code: string, headers?: Record<string, string>) {
   return Response.json({ error: { message, type: code, code } }, { status, headers });
@@ -69,6 +69,12 @@ export async function handleChatCompletions(request: Request): Promise<Response>
     return apiError(400, "`messages` is required.", "invalid_request");
   }
 
+  const burst = burstWait(key);
+  if (burst) {
+    return apiError(429, `Too many requests for this key (${key.perMinute ?? 30}/minute). Retry in ${burst}s.`, "rate_limited", {
+      "Retry-After": String(burst),
+    });
+  }
   const quota = await takeRequest(key);
   if (!quota.ok) {
     const wait = secondsUntilUtcMidnight();

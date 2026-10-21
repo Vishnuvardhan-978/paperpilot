@@ -49,6 +49,25 @@ for (const name of fs.readdirSync(server)) {
 }
 copy(path.join(ROOT, "agent"), path.join(STAGE, "agent"));
 
+// Updates: the installed app reads latest.yml from this HTTPS folder (see electron/updater.mjs).
+const UPDATE_URL = (process.env.PAPERPILOT_UPDATE_URL || "").trim().replace(/\/+$/, "");
+const UPDATE_FILE = path.join(ROOT, "electron", "update.json");
+if (UPDATE_URL && !/^https:\/\//i.test(UPDATE_URL)) {
+  console.error("PAPERPILOT_UPDATE_URL must be an https:// URL.");
+  process.exit(1);
+}
+fs.rmSync(UPDATE_FILE, { force: true });
+if (UPDATE_URL) fs.writeFileSync(UPDATE_FILE, JSON.stringify({ url: UPDATE_URL }));
+
+// Signing: electron-builder signs when CSC_LINK (path or base64 of a .pfx) and CSC_KEY_PASSWORD are set.
+const signing = Boolean(process.env.CSC_LINK || process.env.WIN_CSC_LINK);
+if (!signing && process.env.PAPERPILOT_REQUIRE_SIGNING === "1") {
+  console.error("PAPERPILOT_REQUIRE_SIGNING=1 but CSC_LINK / CSC_KEY_PASSWORD are not set.");
+  process.exit(1);
+}
+console.log(`[desktop] signing: ${signing ? "on (CSC_LINK)" : "off, so the installer shows 'Unknown publisher'"}`);
+console.log(`[desktop] updates: ${UPDATE_URL || "off (set PAPERPILOT_UPDATE_URL)"}`);
+
 console.log("\n[desktop] 3/3 packaging installer…");
 fs.rmSync(OUT, { recursive: true, force: true });
 const electronVersion = JSON.parse(
@@ -70,7 +89,13 @@ await builder.build({
       copy(path.join(STAGE, "server"), path.join(appOutDir, "resources", "server"));
       copy(path.join(STAGE, "agent"), path.join(appOutDir, "resources", "agent"));
     },
-    win: { target: "nsis" },
+    win: {
+      target: "nsis",
+      // Timestamped SHA-256 signatures stay valid after the certificate expires.
+      signtoolOptions: { signingHashAlgorithms: ["sha256"], rfc3161TimeStampServer: "http://timestamp.digicert.com" },
+    },
+    // The generic provider makes electron-builder write latest.yml next to the installer; upload both to UPDATE_URL.
+    publish: UPDATE_URL ? [{ provider: "generic", url: UPDATE_URL }] : null,
     nsis: {
       oneClick: false,
       perMachine: false,
@@ -81,4 +106,6 @@ await builder.build({
   },
 });
 
+fs.rmSync(UPDATE_FILE, { force: true });
 console.log(`\n[desktop] done → ${OUT}`);
+if (UPDATE_URL) console.log(`[desktop] upload release/dist/latest.yml and the Setup .exe to ${UPDATE_URL}`);
