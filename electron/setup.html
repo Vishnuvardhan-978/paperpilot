@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+  <title>PaperPilot setup</title>
+  <style>
+    body { margin:0; height:100vh; display:grid; place-items:center; background:#06091a; color:#e8eef8; font-family:Segoe UI,sans-serif; }
+    form { width:440px; padding:28px; border:1px solid rgba(255,255,255,.1); border-radius:16px; background:rgba(255,255,255,.03); }
+    h1 { margin:0 0 6px; font-size:24px; }
+    p { margin:0 0 18px; color:#8ca3be; font-size:13px; line-height:1.6; }
+    label { display:block; margin:14px 0 6px; font-size:12px; color:#8ca3be; text-transform:uppercase; letter-spacing:.06em; }
+    input { box-sizing:border-box; width:100%; padding:10px 12px; border-radius:10px; border:1px solid rgba(255,255,255,.14); background:#0b1127; color:#e8eef8; font-size:14px; }
+    input:focus { outline:none; border-color:#00d4aa; }
+    button { margin-top:22px; width:100%; padding:11px; border:0; border-radius:10px; background:#00d4aa; color:#06091a; font-weight:700; font-size:14px; cursor:pointer; }
+    a { color:#00d4aa; }
+    .hint { margin-top:6px; font-size:12px; color:#56708f; }
+    .err { margin-top:10px; color:#fca5a5; font-size:13px; min-height:18px; }
+  </style>
+</head>
+<body>
+  <form id="f">
+    <h1>Welcome to PaperPilot</h1>
+    <p>Paste your Gemini API key to get started. It is stored only on this computer.
+      Get a free key at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</p>
+    <label for="key">Gemini API key</label>
+    <input id="key" type="password" autocomplete="off" spellcheck="false" required />
+    <label for="model">Agent model (optional)</label>
+    <input id="model" type="text" placeholder="gemini-2.5-pro" spellcheck="false" />
+    <div class="hint">Leave empty to pick the best model your key can use.</div>
+    <div class="err" id="err"></div>
+    <button type="submit">Start PaperPilot</button>
+  </form>
+  <script>
+    document.getElementById("f").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const geminiApiKey = document.getElementById("key").value.trim();
+      if (geminiApiKey.length < 20) {
+        document.getElementById("err").textContent = "That doesn't look like a Gemini API key.";
+        return;
+      }
+      await window.paperpilotSetup.save({
+        geminiApiKey,
+        geminiAgentModel: document.getElementById("model").value.trim(),
+      });
+    });
+  </script>
+</body>
+</html>

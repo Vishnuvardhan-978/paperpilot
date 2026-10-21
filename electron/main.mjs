@@ -1,21 +1,28 @@
 /**
  * PaperPilot desktop shell.
- * Run: npm run desktop
+ * Dev:       npm run desktop          (uses this folder, next dev / next start)
+ * Installer: npm run desktop:build    (bundled Next server + agent in resources/)
  *
- * Starts (or reuses) the local agent on 8787 and the Next.js app on 3000,
+ * Starts (or reuses) the local agent on 8787 and the Next.js app,
  * then opens the app in its own window — no browser tab, no second terminal.
  */
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, shell } from "electron";
 import { spawn, spawnSync } from "child_process";
 import fs from "fs";
 import http from "http";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const APP_PORT = Number(process.env.PORT || 3000);
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGED = app.isPackaged;
+const ROOT = PACKAGED ? process.resourcesPath : path.join(HERE, "..");
+const APP_PORT = Number(process.env.PORT || (PACKAGED ? 3917 : 3000));
 const AGENT_PORT = Number(process.env.PAPERPILOT_AGENT_PORT || 8787);
-const APP_URL = `http://localhost:${APP_PORT}/app`;
+const APP_HOST = PACKAGED ? "127.0.0.1" : "localhost";
+const APP_URL = `http://${APP_HOST}:${APP_PORT}/app`;
+const SETTINGS_FILE = path.join(app.getPath("userData"), "settings.json");
+const LOG_DIR = path.join(app.getPath("userData"), "logs");
 const children = [];
 
 function ping(url) {
@@ -41,26 +48,113 @@ async function waitFor(url, ms) {
   return false;
 }
 
-/** Prefer the real Node that launched npm; Electron-as-Node is the fallback. */
-function startNode(args) {
+function readSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function writeSettings(settings) {
+  fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), { encoding: "utf8", mode: 0o600 });
+}
+
+/** The installed app has no console, so child output goes to a log file. */
+function childStdio(name) {
+  if (!PACKAGED) return "inherit";
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+  const fd = fs.openSync(path.join(LOG_DIR, `${name}.log`), "w");
+  return ["ignore", fd, fd];
+}
+
+/** Prefer the real Node that launched npm; Electron-as-Node is the fallback (and the only option when installed). */
+function startNode(name, args, { cwd = ROOT, env = {} } = {}) {
   const nodeBin = process.env.npm_node_execpath || process.execPath;
-  const env = { ...process.env };
-  if (nodeBin === process.execPath) env.ELECTRON_RUN_AS_NODE = "1";
-  const child = spawn(nodeBin, args, { cwd: ROOT, env, stdio: "inherit", windowsHide: true });
+  const childEnv = { ...process.env, ...env };
+  if (nodeBin === process.execPath) childEnv.ELECTRON_RUN_AS_NODE = "1";
+  const child = spawn(nodeBin, args, { cwd, env: childEnv, stdio: childStdio(name), windowsHide: true });
   children.push(child);
   return child;
 }
 
-async function ensureServices() {
-  if (!(await ping(`http://127.0.0.1:${AGENT_PORT}/health`))) {
-    startNode([path.join(ROOT, "agent", "server.mjs")]);
+async function ensureServices(settings) {
+  if (!(await ping(`http://127.0.0.1:${AGENT_PORT}/`))) {
+    startNode("agent", [path.join(ROOT, "agent", "server.mjs")], {
+      env: PACKAGED ? { PAPERPILOT_WORKSPACE: os.homedir() } : {},
+    });
   }
-  if (!(await ping(`http://localhost:${APP_PORT}/`))) {
-    const nextBin = path.join(ROOT, "node_modules", "next", "dist", "bin", "next");
-    const hasBuild = fs.existsSync(path.join(ROOT, ".next", "BUILD_ID"));
-    startNode([nextBin, hasBuild ? "start" : "dev", "-p", String(APP_PORT)]);
+  if (!(await ping(`http://${APP_HOST}:${APP_PORT}/`))) {
+    if (PACKAGED) {
+      const serverDir = path.join(ROOT, "server");
+      startNode("app", [path.join(serverDir, "server.js")], {
+        cwd: serverDir,
+        env: {
+          PORT: String(APP_PORT),
+          HOSTNAME: APP_HOST,
+          GEMINI_API_KEY: settings.geminiApiKey || "",
+          ...(settings.geminiAgentModel ? { GEMINI_AGENT_MODEL: settings.geminiAgentModel } : {}),
+        },
+      });
+    } else {
+      const nextBin = path.join(ROOT, "node_modules", "next", "dist", "bin", "next");
+      const hasBuild = fs.existsSync(path.join(ROOT, ".next", "BUILD_ID"));
+      startNode("app", [nextBin, hasBuild ? "start" : "dev", "-p", String(APP_PORT)]);
+    }
   }
-  return waitFor(`http://localhost:${APP_PORT}/`, 180_000);
+  return waitFor(`http://${APP_HOST}:${APP_PORT}/`, 180_000);
+}
+
+/** First launch of the installed app: ask for the user's own Gemini key (never bundled). */
+async function ensureSettings(win) {
+  const settings = readSettings();
+  if (!PACKAGED || settings.geminiApiKey) return settings;
+  const saved = new Promise((resolve) => {
+    ipcMain.handleOnce("paperpilot:save-settings", (_event, input) => {
+      const next = {
+        ...settings,
+        geminiApiKey: String(input?.geminiApiKey || "").trim(),
+        geminiAgentModel: String(input?.geminiAgentModel || "").trim(),
+      };
+      writeSettings(next);
+      resolve(next);
+      return true;
+    });
+  });
+  await win.loadFile(path.join(HERE, "setup.html"));
+  return saved;
+}
+
+function buildMenu() {
+  const template = [
+    {
+      label: "File",
+      submenu: [
+        {
+          label: "Change Gemini API key…",
+          visible: PACKAGED,
+          click: () => {
+            const settings = readSettings();
+            delete settings.geminiApiKey;
+            writeSettings(settings);
+            stopChildren();
+            app.relaunch();
+            app.exit(0);
+          },
+        },
+        { label: "Open logs folder", visible: PACKAGED, click: () => void shell.openPath(LOG_DIR) },
+        { type: "separator", visible: PACKAGED },
+        { role: "reload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 const SPLASH = `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
@@ -78,7 +172,11 @@ async function createWindow() {
     title: "PaperPilot",
     backgroundColor: "#06091a",
     autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, sandbox: true },
+    webPreferences: {
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(HERE, "preload.cjs"),
+    },
   });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -86,14 +184,16 @@ async function createWindow() {
     return { action: "deny" };
   });
 
+  const settings = await ensureSettings(win);
   await win.loadURL(SPLASH);
-  const ok = await ensureServices();
+  const ok = await ensureServices(settings);
   if (ok) {
     await win.loadURL(APP_URL);
   } else {
+    const where = PACKAGED ? `See the logs in ${LOG_DIR}` : "Check the terminal output.";
     await win.loadURL(
       `data:text/html;charset=utf-8,${encodeURIComponent(
-        `<body style="background:#06091a;color:#fca5a5;font-family:Segoe UI;padding:40px">Could not start the app on port ${APP_PORT}. Check the terminal output.</body>`,
+        `<body style="background:#06091a;color:#fca5a5;font-family:Segoe UI;padding:40px">Could not start the app on port ${APP_PORT}. ${where}</body>`,
       )}`,
     );
   }
@@ -110,7 +210,21 @@ function stopChildren() {
   }
 }
 
-app.whenReady().then(createWindow);
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const [win] = BrowserWindow.getAllWindows();
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+  app.whenReady().then(() => {
+    buildMenu();
+    return createWindow();
+  });
+}
 app.on("window-all-closed", () => {
   stopChildren();
   app.quit();

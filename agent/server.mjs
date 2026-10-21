@@ -7,7 +7,9 @@
  */
 import http from "http";
 import fs from "fs";
+import os from "os";
 import path from "path";
+import crypto from "crypto";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 
@@ -15,6 +17,62 @@ const AGENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 let pickingFolder = false;
 
 const PORT = Number(process.env.PAPERPILOT_AGENT_PORT || 8787);
+const TOKEN_HEADER = "x-paperpilot-token";
+const TOKEN_FILE =
+  process.env.PAPERPILOT_TOKEN_FILE || path.join(os.homedir(), ".paperpilot", "agent-token");
+const TOKEN = loadToken();
+const EXTRA_ORIGINS = new Set(
+  String(process.env.PAPERPILOT_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim().replace(/\/+$/, ""))
+    .filter(Boolean),
+);
+
+/** Shared secret with the Next.js server, which hands it only to same-origin app pages. */
+function loadToken() {
+  const fromEnv = String(process.env.PAPERPILOT_AGENT_TOKEN || "").trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const saved = fs.readFileSync(TOKEN_FILE, "utf8").trim();
+    if (saved.length >= 32) return saved;
+  } catch {
+    /* first run */
+  }
+  const fresh = crypto.randomBytes(32).toString("hex");
+  fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
+  fs.writeFileSync(TOKEN_FILE, fresh, { encoding: "utf8", mode: 0o600 });
+  return fresh;
+}
+
+function tokenMatches(given) {
+  const a = Buffer.from(String(given || ""));
+  const b = Buffer.from(TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/** Pages served from this machine (any port) — never a remote website. */
+function isAllowedOrigin(origin) {
+  if (EXTRA_ORIGINS.has(origin)) return true;
+  let url;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const local = new Set(["localhost", "127.0.0.1", "[::1]"]);
+  for (const iface of Object.values(os.networkInterfaces()).flat()) {
+    if (!iface) continue;
+    local.add(iface.family === "IPv6" ? `[${iface.address}]` : iface.address);
+  }
+  return local.has(url.hostname.toLowerCase());
+}
+
+/** Rejects DNS-rebinding: a hostile domain resolving to 127.0.0.1 still sends its own Host. */
+function isAllowedHost(host) {
+  const h = String(host || "").toLowerCase();
+  return h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `[::1]:${PORT}`;
+}
 /** Mutable so the UI can point at a folder without restarting (Cursor-like). */
 let ROOT = path.resolve(process.env.PAPERPILOT_WORKSPACE || process.cwd());
 const SKIP_DIRS = new Set([
@@ -39,14 +97,23 @@ const MAX_EXEC_OUT = 80_000;
 const BLOCKED_EXEC =
   /\b(format\s+[a-z]:|shutdown|restart-computer|rm\s+-rf\s+[\/\\]|del\s+\/[sq]|Remove-Item\s+.*-Recurse\s+[A-Z]:|mkfs|dd\s+if=)/i;
 
+function corsHeaders(res) {
+  if (!res.corsOrigin) return { Vary: "Origin" };
+  return {
+    Vary: "Origin",
+    "Access-Control-Allow-Origin": res.corsOrigin,
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": `Content-Type, ${TOKEN_HEADER}`,
+    "Access-Control-Allow-Private-Network": "true",
+  };
+}
+
 function send(res, status, body) {
   const json = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Private-Network": "true",
+    "Cache-Control": "no-store",
+    ...corsHeaders(res),
   });
   res.end(json);
 }
@@ -296,12 +363,25 @@ function runExec(command, cwdRel = ".") {
 }
 
 const server = http.createServer(async (req, res) => {
+  const origin = req.headers.origin;
+  if (!isAllowedHost(req.headers.host) || (origin && !isAllowedOrigin(origin))) {
+    send(res, 403, { error: "Forbidden: requests are only accepted from PaperPilot on this machine." });
+    return;
+  }
+  res.corsOrigin = origin || null;
+
   if (req.method === "OPTIONS") {
-    send(res, 204, {});
+    res.writeHead(204, corsHeaders(res));
+    res.end();
     return;
   }
 
   const url = new URL(req.url || "/", `http://127.0.0.1:${PORT}`);
+  const isLandingPage = req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html");
+  if (!isLandingPage && !tokenMatches(req.headers[TOKEN_HEADER])) {
+    send(res, 401, { error: "Missing or wrong agent token. Reload PaperPilot." });
+    return;
+  }
 
   try {
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
@@ -328,17 +408,13 @@ const server = http.createServer(async (req, res) => {
     <h1>PaperPilot Local Agent</h1>
     <p>Machine helper for Cursor-like tools: read, write, search, terminal.</p>
     <div class="card">
-      <p><strong>Workspace:</strong> <code>${ROOT.replace(/\\/g, "\\\\")}</code></p>
-      <p><strong>Health:</strong> <a href="/health">/health</a></p>
+      <p>Locked to PaperPilot: every tool call needs the app's secret token.</p>
       <p>Open the app and use Folder / Agent mode. Keep this process running.</p>
     </div>
   </main>
 </body>
 </html>`;
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Access-Control-Allow-Origin": "*",
-      });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(html);
       return;
     }
@@ -526,5 +602,6 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`PaperPilot Local Agent (phase 2) on http://127.0.0.1:${PORT}`);
   console.log(`Workspace root: ${ROOT}`);
   console.log(`Tools: list read write search exec`);
+  console.log(`Token file: ${TOKEN_FILE} (only PaperPilot pages on this machine are accepted)`);
   console.log(`Set PAPERPILOT_WORKSPACE to point at a project folder.`);
 });

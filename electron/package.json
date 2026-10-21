@@ -1,0 +1,8 @@
+{
+  "name": "paperpilot",
+  "productName": "PaperPilot",
+  "version": "0.1.0",
+  "description": "PaperPilot: AI coding and study assistant",
+  "author": "Vishnuvardhan",
+  "main": "main.mjs"
+}
