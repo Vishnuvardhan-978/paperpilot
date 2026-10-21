@@ -10,12 +10,12 @@ export default function manifest(): MetadataRoute.Manifest {
     background_color: "#06091a",
     theme_color: "#00d4aa",
     icons: [
-      {
-        src: "/file.svg",
-        sizes: "any",
-        type: "image/svg+xml",
-        purpose: "any",
-      },
+      { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" },
+      { src: "/icon.svg", sizes: "any", type: "image/svg+xml", purpose: "maskable" },
+    ],
+    shortcuts: [
+      { name: "Study", url: "/study" },
+      { name: "Parent dashboard", url: "/parent" },
     ],
   };
 }

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Fraunces, Manrope } from "next/font/google";
 import "./globals.css";
+import { OfflineSupport } from "@/components/offline-support";
 
 const display = Fraunces({
   variable: "--font-display",
@@ -22,6 +23,9 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: "#00d4aa",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -30,7 +34,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${display.variable} ${body.variable} h-full antialiased`}
     >
-      <body className="flex min-h-full flex-col bg-bg0 text-text">{children}</body>
+      <body className="flex min-h-full flex-col bg-bg0 text-text">
+        <OfflineSupport />
+        {children}
+      </body>
     </html>
   );
 }
