@@ -155,18 +155,34 @@ function partsToText(input: string | ContentPart[]) {
     .join("\n\n");
 }
 
+/** Which service wrote an answer, and the ones skipped before it. */
+export type AnswerMeta = {
+  provider: string;
+  model: string;
+  skipped: { provider: string; reason: string }[];
+};
+
 /** Plain chat answer (Ask). YouTube parts can only be watched by Gemini. */
-export async function* streamText(input: string | ContentPart[]): AsyncGenerator<string> {
+export async function* streamText(
+  input: string | ContentPart[],
+  onMeta?: (meta: AnswerMeta) => void,
+): AsyncGenerator<string> {
   const needsGemini = typeof input !== "string" && input.some((p) => "fileData" in p || "inlineData" in p);
   const order = needsGemini ? providerOrder().filter((p) => p === "gemini") : providerOrder();
   if (needsGemini && !order.length) throw new Error("Reading YouTube videos needs GEMINI_API_KEY.");
 
   const failures: { provider: ProviderId; error: unknown }[] = [];
+  const announce = (provider: ProviderId, model: string) =>
+    onMeta?.({
+      provider: providerLabel(provider),
+      model,
+      skipped: failures.map((f) => ({ provider: providerLabel(f.provider), reason: shortReason(f.error) })),
+    });
   for (const provider of order) {
     let yielded = false;
     try {
       if (provider === "gemini") {
-        for await (const text of streamGeminiText(input)) {
+        for await (const text of streamGeminiText(input, (model) => announce("gemini", model))) {
           yielded = true;
           yield text;
         }
@@ -185,6 +201,7 @@ export async function* streamText(input: string | ContentPart[]): AsyncGenerator
             messages: [{ role: "user", content: prompt }],
           })) {
             if (chunk.type === "text") {
+              if (!yielded) announce(provider, model);
               yielded = true;
               yield chunk.text;
             }

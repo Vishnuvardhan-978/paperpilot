@@ -1304,6 +1304,7 @@ export default function App() {
       const decoder = new TextDecoder();
       let buffer = "";
       let answer = "";
+      let answeredBy: Message["answeredBy"];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1319,8 +1320,16 @@ export default function App() {
             text?: string;
             done?: boolean;
             error?: string;
+            meta?: Message["answeredBy"];
           };
           if (payload.error) throw new Error(payload.error);
+          if (payload.meta) {
+            answeredBy = payload.meta;
+            setSession((prev) => ({
+              ...prev,
+              messages: prev.messages.map((m) => (m.id === assistantId ? { ...m, answeredBy } : m)),
+            }));
+          }
           if (payload.text) {
             answer += payload.text;
             setSession((prev) => ({
@@ -1345,7 +1354,7 @@ export default function App() {
         ...next,
         title: titled,
         messages: next.messages.map((m) =>
-          m.id === assistantId ? { ...m, content: answer } : m,
+          m.id === assistantId ? { ...m, content: answer, answeredBy } : m,
         ),
       });
       setLastQuestion(null);
@@ -2499,6 +2508,25 @@ function CommandPalette({
   );
 }
 
+function ProviderBadge({ by }: { by: NonNullable<Message["answeredBy"]> }) {
+  const fellBack = by.skipped.length > 0;
+  const title = [
+    `Answered by ${by.provider} (${by.model})`,
+    ...by.skipped.map((s) => `Skipped ${s.provider}: ${s.reason}`),
+  ].join("\n");
+  return (
+    <span
+      title={title}
+      className={`mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+        fellBack ? "border-amber-400/40 bg-amber-400/10 text-amber-200" : "border-white/10 bg-white/[0.04] text-[#8ca3be]"
+      }`}
+    >
+      {by.provider}
+      {fellBack && <span>· fell back from {by.skipped.map((s) => s.provider).join(", ")}</span>}
+    </span>
+  );
+}
+
 function GroundBadge({ g }: { g: GroundednessResult }) {
   const color =
     g.level === "high"
@@ -3623,6 +3651,7 @@ function Bubble({
           ) : null}
           {streaming && body && <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-[#00d4aa]" />}
           {!streaming && grounded && grounded.total > 0 && <GroundBadge g={grounded} />}
+          {msg.answeredBy && <ProviderBadge by={msg.answeredBy} />}
           {showExtras && confidence && hasDocText && (
             <div className="mt-2 text-[11px] text-[#415570]">
               Model confidence:{" "}

@@ -47,6 +47,8 @@ export type Message = {
   agent?: AgentRunView;
   /** Present on image / video generation replies. */
   media?: MediaView;
+  /** Which AI service wrote this answer, and any it fell back from. */
+  answeredBy?: { provider: string; model: string; skipped: { provider: string; reason: string }[] };
 };
 
 export type DocumentMeta = {

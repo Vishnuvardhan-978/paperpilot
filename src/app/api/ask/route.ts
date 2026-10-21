@@ -1,5 +1,5 @@
 import { buildAskParts, formatAskError, type AskHistoryTurn } from "@/lib/gemini";
-import { streamText } from "@/lib/ai";
+import { streamText, type AnswerMeta } from "@/lib/ai";
 import type { AskIntent, LensId } from "@/lib/lenses";
 import type { AskScope } from "@/lib/scopes";
 import { allowRequest, clientKeyFromRequest } from "@/lib/api-limit";
@@ -103,7 +103,9 @@ export async function POST(request: Request) {
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          for await (const chunk of streamText(parts)) {
+          const onMeta = (meta: AnswerMeta) =>
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ meta })}\n\n`));
+          for await (const chunk of streamText(parts, onMeta)) {
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify({ text: chunk })}\n\n`),
             );

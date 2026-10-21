@@ -100,6 +100,7 @@ function asContents(input: string | ContentPart[]) {
 
 export async function* streamWithFallback(
   input: string | ContentPart[],
+  onModel?: (model: string) => void,
 ): AsyncGenerator<string> {
   const ai = getClient();
   let lastError: unknown;
@@ -117,6 +118,7 @@ export async function* streamWithFallback(
         for await (const chunk of stream) {
           const text = chunk.text;
           if (text) {
+            if (!yielded) onModel?.(modelName);
             yielded = true;
             yield text;
           }
