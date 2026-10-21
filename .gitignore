@@ -45,3 +45,13 @@ eng.traineddata
 COMMON/
 Library/
 *.ppbak
+
+# generated: Monaco copy (scripts/copy-monaco.mjs) and desktop installer output
+/public/monaco/
+/release/
+/e2e-results/
+
+# model training: downloaded data, checkpoints, Python cache
+/training/**/data/
+/training/**/out*/
+__pycache__/

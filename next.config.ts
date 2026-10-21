@@ -11,6 +11,8 @@ function currentLanIps() {
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: currentLanIps(),
+  // scripts/build-desktop.mjs sets this to get a self-contained server for the installer.
+  output: process.env.PAPERPILOT_STANDALONE === "1" ? "standalone" : undefined,
   // Allow file uploads up to 10MB (FormData to /api/extract)
   experimental: {
     serverActions: {

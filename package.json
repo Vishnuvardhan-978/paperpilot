@@ -4,18 +4,28 @@
   "private": true,
   "main": "electron/main.mjs",
   "scripts": {
+    "postinstall": "node scripts/copy-monaco.mjs",
+    "predev": "node scripts/copy-monaco.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-monaco.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "agent": "node agent/server.mjs",
-    "desktop": "electron ."
+    "desktop": "electron .",
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "test:e2e:media": "node scripts/e2e-media.mjs",
+    "test:ai": "node scripts/e2e-ai.mjs",
+    "keys": "node scripts/pp-keys.mjs",
+    "training:export": "node scripts/training-export.mjs",
+    "test:e2e": "node scripts/e2e-agent.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",
     "@monaco-editor/react": "^4.7.0",
     "@napi-rs/canvas": "^1.0.9",
     "mammoth": "^1.12.3",
+    "monaco-editor": "^0.57.0",
     "next": "16.3.5",
     "pdfjs-dist": "^6.3.289",
     "react": "19.2.8",
@@ -30,8 +40,10 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
     "eslint": "^9",
     "eslint-config-next": "16.3.5",
+    "playwright-core": "^1.64.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
