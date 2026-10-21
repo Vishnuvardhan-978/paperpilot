@@ -289,3 +289,33 @@ export function stripPathComment(code: string) {
   }
   return lines.slice(i).join("\n").replace(/^\n+/, "");
 }
+
+export type GitFile = { path: string; staged: boolean; status: "modified" | "added" | "deleted" | "renamed" | "untracked" };
+export type GitStatus = { repo: boolean; error?: string; branch?: string; ahead?: number; behind?: number; files?: GitFile[] };
+
+async function agentJson<T>(pathAndQuery: string, init?: RequestInit): Promise<T> {
+  const r = await agentFetch(pathAndQuery, init);
+  const data = (await r.json().catch(() => ({}))) as T & { error?: string };
+  if (!r.ok) throw new Error(data.error || `Agent error ${r.status}`);
+  return data;
+}
+
+export function agentGitStatus() {
+  return agentJson<GitStatus>("/git/status");
+}
+
+export function agentGitDiff(path: string) {
+  return agentJson<{ path: string; diff: string; untracked?: boolean; error?: string }>(`/git/diff?path=${encodeURIComponent(path)}`);
+}
+
+export function agentGitLog() {
+  return agentJson<{ commits: { hash: string; subject: string; author: string; when: string }[] }>("/git/log");
+}
+
+export function agentGitCommit(message: string, paths: string[]) {
+  return agentJson<{ ok: boolean; output?: string; error?: string; status?: GitStatus }>("/git/commit", {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ message, paths }),
+  });
+}

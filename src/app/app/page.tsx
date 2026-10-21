@@ -36,6 +36,7 @@ import {
   setActiveChatId,
   titleFromDocument,
   youtubeUrlsFromDocs,
+  type AgentResume,
 } from "@/lib/chat-store";
 import {
   exportChatMarkdown,
@@ -55,7 +56,9 @@ import {
 import { exportTrustReceipt } from "@/lib/trust-receipt";
 import { bumpStudyActivity, getStudyStreak } from "@/lib/progress";
 import { addCards } from "@/lib/learning";
+import { TOOL_GROUPS, groupForTool, policyForTool, setToolPolicy } from "@/lib/agent-permissions";
 import { PdfQuoteViewer } from "@/components/pdf-quote-viewer";
+import { GitPanel } from "@/components/git-panel";
 import { getParentSettings, logKidQuestion } from "@/lib/parental";
 import { canAsk, getAskUsage, recordAsk } from "@/lib/rate-limit";
 import {
@@ -131,6 +134,9 @@ import { diffStats, lineDiff } from "@/lib/line-diff";
 import { extractProposedPatches, type ProposedPatch } from "@/lib/proposed-patches";
 import { planFileEdit } from "@/lib/apply-edit";
 /** Open YouTube search / URL in a new tab. Web apps cannot control other desktop apps. */
+/** Messages that pick up a paused or stopped agent run. */
+const RESUME_WORDS = /^\s*(continue|resume|keep going|go on)\b/i;
+
 function tryOpenExternal(prompt: string): { opened: boolean; reply: string } | null {
   const text = prompt.trim();
   const ytSearch = text.match(
@@ -297,6 +303,9 @@ export default function App() {
   const chatDragStart = useRef(0);
   const [streak, setStreak] = useState({ count: 0, best: 0, quizzes: 0, claims: 0 });
   const abortRef = useRef<AbortController | null>(null);
+  const [permissionAsk, setPermissionAsk] = useState<{ verb: string; target: string; group: string; detail: string } | null>(null);
+  const permissionResolve = useRef<((ok: boolean) => void) | null>(null);
+  const resumeRef = useRef<AgentResume | null>(null);
   /** Full traces of this session's agent runs (kept in memory only), for 👍/👎 training examples. */
   const agentTraces = useRef(new Map<string, { chatId: string; trace: Omit<AgentStepRequest, "turns"> & { turns: AgentContent[] } }>());
   const [rateableRuns, setRateableRuns] = useState<ReadonlySet<string>>(() => new Set());
@@ -1162,8 +1171,11 @@ export default function App() {
           root: meta?.root,
           paths: meta?.paths || [],
         };
-        const turns: AgentContent[] = [];
-        let model: string | null = null;
+        const resume = RESUME_WORDS.test(displayQuestion) ? next.agentResume : undefined;
+        const runQuestion = resume?.question ?? displayQuestion;
+        const turns: AgentContent[] = resume ? [...resume.turns] : [];
+        let model: string | null = resume?.model ?? null;
+        resumeRef.current = null;
         let runChanges: AgentChange[] = next.agentChanges ?? [];
         let run: AgentRunView = { steps: [], working: true, startedAt: Date.now() };
         let answer = "";
@@ -1185,7 +1197,7 @@ export default function App() {
           if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
 
           const step = await streamAgentStep(
-            { question: displayQuestion, history, project, focusPath: workspaceFocusPath, turns, model },
+            { question: runQuestion, history, project, focusPath: workspaceFocusPath, turns, model },
             controller.signal,
             (live) => {
               run = { ...run, thinking: live.status || lastThought(live.thought) };
@@ -1226,7 +1238,19 @@ export default function App() {
               }
             }
 
-            const result = await runLocalAgentTool(call, { paths: project.paths });
+            const policy = policyForTool(call.name);
+            const allowed =
+              policy === "allow" ||
+              (policy === "ask" &&
+                (await new Promise<boolean>((resolve) => {
+                  permissionResolve.current = resolve;
+                  setPermissionAsk({ ...label, group: groupForTool(call.name).label, detail: call.args.command || call.args.path || "" });
+                })));
+            setPermissionAsk(null);
+            if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+            const result = allowed
+              ? await runLocalAgentTool(call, { paths: project.paths })
+              : JSON.stringify({ error: `The user did not allow ${call.name}${policy === "deny" ? " (blocked in agent permissions)" : ""}. Do not retry it; continue another way or explain what you need.` });
             const err = toolResultError(call, result);
             patchStep(call.id, { status: err ? "error" : "ok", error: err ?? undefined });
 
@@ -1257,11 +1281,14 @@ export default function App() {
           }
           turns.push({ role: "user", parts: responses });
           compactOldToolResults(turns);
+          resumeRef.current = { question: runQuestion, turns: [...turns], model, at: Date.now() };
         }
 
         if (!finished) {
           answer = `${answer ? `${answer}\n\n` : ""}_Paused after ${MAX_AGENT_STEPS} rounds — say **continue** to keep going._`;
         }
+        const agentResume = finished ? undefined : resumeRef.current ?? undefined;
+        resumeRef.current = null;
         run = { ...run, working: false, thinking: undefined, endedAt: Date.now() };
         show();
         const finalRun = run;
@@ -1281,6 +1308,7 @@ export default function App() {
           ...next,
           title: titled,
           agentChanges: runChanges,
+          agentResume,
           messages: next.messages.map((m) =>
             m.id === assistantId ? { ...m, content: answer, agent: finalRun } : m,
           ),
@@ -1378,13 +1406,13 @@ export default function App() {
           if (last?.role === "assistant" && (last.content.trim() || last.agent?.steps.length)) {
             msgs[msgs.length - 1] = {
               ...last,
-              content: `${last.content.trim()}\n\n_(Stopped)_`.trim(),
+              content: `${last.content.trim()}\n\n_(Stopped${resumeRef.current ? " — say **continue** to pick up where it left off" : ""})_`.trim(),
               agent: last.agent ? { ...last.agent, working: false, thinking: undefined, endedAt: Date.now() } : undefined,
             };
           } else if (last?.role === "assistant") {
             msgs.pop();
           }
-          const stopped = { ...prev, documents: current, messages: msgs };
+          const stopped = { ...prev, documents: current, messages: msgs, agentResume: resumeRef.current ?? prev.agentResume };
           void saveChat(stopped);
           return stopped;
         });
@@ -1395,7 +1423,7 @@ export default function App() {
           const keep = partial?.agent?.steps.length
             ? [{ ...partial, agent: { ...partial.agent, working: false, thinking: undefined, endedAt: Date.now() } }]
             : [];
-          const failed = { ...prev, documents: currentDocs, messages: [...baseMessages, um, ...keep] };
+          const failed = { ...prev, documents: currentDocs, messages: [...baseMessages, um, ...keep], agentResume: resumeRef.current ?? prev.agentResume };
           void saveChat(failed);
           return failed;
         });
@@ -1524,6 +1552,7 @@ export default function App() {
 
   function stopGenerating() {
     abortRef.current?.abort();
+    permissionResolve.current?.(false);
   }
 
   function startEdit(msg: Message) {
@@ -2443,6 +2472,39 @@ export default function App() {
       )}
 
       {/* onboarding */}
+      {permissionAsk && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0b1127] p-5 shadow-2xl">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-[#8ca3be]">Agent wants to: {permissionAsk.group}</div>
+            <div className="mt-2 text-sm text-white">
+              {permissionAsk.verb} <span className="text-[#00d4aa]">{permissionAsk.target}</span>
+            </div>
+            {permissionAsk.detail && (
+              <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[#080d1c] p-3 font-mono text-[11px] text-[#c5d4e6]">{permissionAsk.detail}</pre>
+            )}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button type="button" onClick={() => permissionResolve.current?.(false)} className="rounded-lg border border-white/10 px-3 py-1.5 text-sm text-[#c5d4e6] hover:bg-white/[0.06]">
+                Deny
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const g = TOOL_GROUPS.find((x) => x.label === permissionAsk.group);
+                  if (g) setToolPolicy(g.id, "allow");
+                  permissionResolve.current?.(true);
+                }}
+                className="rounded-lg border border-white/10 px-3 py-1.5 text-sm text-[#c5d4e6] hover:bg-white/[0.06]"
+              >
+                Always allow
+              </button>
+              <button type="button" autoFocus onClick={() => permissionResolve.current?.(true)} className="rounded-lg bg-[#00d4aa] px-4 py-1.5 text-sm font-semibold text-[#06091a]">
+                Allow once
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showOnboard && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
           <div className="animate-rise w-full max-w-md rounded-3xl border border-white/[0.1] bg-[#0b1127] p-6 shadow-2xl">
@@ -2796,7 +2858,7 @@ function DirectWorkspacePane({
 
   const [tabs, setTabs] = useState<string[]>([]);
   const [recent, setRecent] = useState<string[]>([]);
-  const [sideView, setSideView] = useState<"files" | "search">("files");
+  const [sideView, setSideView] = useState<"files" | "search" | "git">("files");
   const [sideOpen, setSideOpen] = useState(true);
   const [sideWidth, setSideWidth] = useStoredWidth("paperpilot-ide-sidebar", 252);
   const dragStart = useRef(0);
@@ -2860,6 +2922,9 @@ function DirectWorkspacePane({
             <button type="button" onClick={() => setSideView("search")} className={`side-tab ${sideView === "search" ? "is-on" : ""}`} title="Ctrl+Shift+F">
               Search
             </button>
+            <button type="button" onClick={() => setSideView("git")} className={`side-tab ${sideView === "git" ? "is-on" : ""}`} title="Source control">
+              Git
+            </button>
             <button type="button" onClick={() => setQuickOpen(true)} className="side-tab ml-auto" title="Go to file (Ctrl+P)">
               ⌕
             </button>
@@ -2877,6 +2942,8 @@ function DirectWorkspacePane({
                 <WorkspaceTree nodes={tree} focusPath={activePath} onFocusPath={focusFile} />
               </div>
             </>
+          ) : sideView === "git" ? (
+            <GitPanel onOpen={focusFile} epoch={fileEpoch} />
           ) : (
             <SearchPanel onOpen={openAtLine} />
           )}

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Card, PageShell, btn, input } from "@/components/page-shell";
+import { TOOL_GROUPS, getToolPolicies, setToolPolicy, type ToolPolicy } from "@/lib/agent-permissions";
 
 type Setting = {
   key: string;
@@ -121,6 +122,8 @@ export default function SettingsPage() {
           </Card>
         ))}
 
+      <AgentPermissions />
+
       {status && (
         <div className="flex justify-end">
           <button
@@ -134,5 +137,43 @@ export default function SettingsPage() {
         </div>
       )}
     </PageShell>
+  );
+}
+
+function AgentPermissions() {
+  const [policies, setPolicies] = useState<Record<string, ToolPolicy>>({});
+
+  useEffect(() => {
+    // localStorage is only readable after mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPolicies(getToolPolicies());
+  }, []);
+
+  return (
+    <Card title="Coding agent permissions">
+      <div className="space-y-3">
+        {TOOL_GROUPS.map((g) => (
+          <div key={g.id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <span className="text-[#c5d4e6]">{g.label}</span>
+            <div className="flex gap-1">
+              {(["allow", "ask", "deny"] as ToolPolicy[]).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => {
+                    setToolPolicy(g.id, p);
+                    setPolicies(getToolPolicies());
+                  }}
+                  className={`rounded-full border px-3 py-1 text-xs capitalize ${policies[g.id] === p ? "border-[#00d4aa]/60 text-[#00d4aa]" : "border-white/10 text-[#8ca3be]"}`}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+        <p className="text-xs text-[#415570]">&quot;Ask&quot; shows a prompt before each call. Saved in this browser.</p>
+      </div>
+    </Card>
   );
 }

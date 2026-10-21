@@ -81,6 +81,15 @@ export type ChatSession = {
   messages: Message[];
   /** Files the coding agent wrote in this chat (review / undo). */
   agentChanges?: AgentChange[];
+  /** An agent run that paused or was stopped; "continue" picks it up, even after a reload. */
+  agentResume?: AgentResume;
+};
+
+export type AgentResume = {
+  question: string;
+  turns: { role: "user" | "model"; parts: Record<string, unknown>[] }[];
+  model: string | null;
+  at: number;
 };
 
 const DB_NAME = "paperpilot";

@@ -305,6 +305,59 @@ function pickFolderNative() {
   });
 }
 
+/** git with an argument list (no shell), run in the workspace root. */
+function runGit(args, maxOut = 400_000) {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, { cwd: ROOT, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" } });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (b) => {
+      if (stdout.length < maxOut) stdout += b.toString("utf8");
+    });
+    child.stderr.on("data", (b) => {
+      if (stderr.length < 20_000) stderr += b.toString("utf8");
+    });
+    child.on("error", (e) => resolve({ code: -1, stdout: "", stderr: e.message }));
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+/** Paths from the client: relative, inside the workspace, never options. */
+function gitPaths(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((p) => String(p || "").trim())
+    .filter(Boolean)
+    .map((p) => {
+      safeJoin(p);
+      return p.replace(/\\/g, "/");
+    });
+}
+
+async function gitStatus() {
+  const r = await runGit(["status", "--porcelain=v1", "-b", "-z", "--untracked-files=all"]);
+  if (r.code !== 0) return { repo: false, error: r.stderr.trim() || "Not a git repository" };
+  const entries = r.stdout.split("\0").filter(Boolean);
+  let branch = "";
+  let ahead = 0;
+  let behind = 0;
+  const files = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (e.startsWith("## ")) {
+      branch = e.slice(3).split("...")[0];
+      ahead = Number(/ahead (\d+)/.exec(e)?.[1] || 0);
+      behind = Number(/behind (\d+)/.exec(e)?.[1] || 0);
+      continue;
+    }
+    const x = e[0];
+    const y = e[1];
+    const file = e.slice(3);
+    if (x === "R" || x === "C") i++; // the original path follows a rename
+    files.push({ path: file, staged: x !== " " && x !== "?", status: x === "?" ? "untracked" : x === "A" || y === "A" ? "added" : x === "D" || y === "D" ? "deleted" : x === "R" ? "renamed" : "modified" });
+  }
+  return { repo: true, branch, ahead, behind, files };
+}
+
 function runExec(command, cwdRel = ".") {
   const cmd = String(command || "").trim();
   if (!cmd) throw new Error("command required");
@@ -425,7 +478,7 @@ const server = http.createServer(async (req, res) => {
         name: "PaperPilot Local Agent",
         workspace: ROOT,
         phase: 2,
-        capabilities: ["read", "write", "list", "search", "exec", "tree", "workspace", "pick-folder", "restore", "delete"],
+        capabilities: ["read", "write", "list", "search", "exec", "tree", "workspace", "pick-folder", "restore", "delete", "git"],
       });
       return;
     }
@@ -582,6 +635,61 @@ const server = http.createServer(async (req, res) => {
       }
       if (fs.existsSync(`${full}.ppbak`)) fs.unlinkSync(`${full}.ppbak`);
       send(res, 200, { ok: true, path: body.path });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/git/status") {
+      send(res, 200, await gitStatus());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/git/diff") {
+      const [file] = gitPaths([url.searchParams.get("path")]);
+      if (!file) {
+        send(res, 400, { error: "path required" });
+        return;
+      }
+      const tracked = (await runGit(["ls-files", "--error-unmatch", "--", file])).code === 0;
+      if (tracked) {
+        const r = await runGit(["diff", "HEAD", "--no-color", "--", file]);
+        send(res, 200, { path: file, diff: r.stdout, error: r.code === 0 ? undefined : r.stderr.trim() });
+      } else {
+        const full = safeJoin(file);
+        const text = fs.existsSync(full) && fs.statSync(full).size < 400_000 ? fs.readFileSync(full, "utf8") : "";
+        send(res, 200, { path: file, diff: text.split(/\r?\n/).map((l) => `+${l}`).join("\n"), untracked: true });
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/git/log") {
+      const r = await runGit(["log", "-n", "20", "--pretty=format:%h%x1f%s%x1f%an%x1f%ar"]);
+      const commits = r.code === 0 ? r.stdout.split("\n").filter(Boolean).map((l) => {
+        const [hash, subject, author, when] = l.split("\x1f");
+        return { hash, subject, author, when };
+      }) : [];
+      send(res, 200, { commits });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/git/commit") {
+      const body = await readBody(req);
+      const message = String(body.message || "").trim();
+      const files = gitPaths(body.paths);
+      if (!message) {
+        send(res, 400, { error: "Commit message required" });
+        return;
+      }
+      if (!files.length) {
+        send(res, 400, { error: "Pick at least one file" });
+        return;
+      }
+      const add = await runGit(["add", "-A", "--", ...files]);
+      if (add.code !== 0) {
+        send(res, 200, { ok: false, error: add.stderr.trim() || "git add failed" });
+        return;
+      }
+      const commit = await runGit(["commit", "-m", message, "--", ...files]);
+      send(res, 200, { ok: commit.code === 0, output: (commit.stdout + commit.stderr).trim(), status: await gitStatus() });
       return;
     }
 
