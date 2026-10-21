@@ -17,12 +17,14 @@ import {
   DocumentMeta,
   MAX_DOCS,
   Message,
+  type MediaView,
   clearActiveChatId,
   combinedDocumentText,
   createEmptySession,
   deleteChat,
   documentNames,
   getActiveChatId,
+  getChat,
   getDocuments,
   hasSeenOnboarding,
   listChats,
@@ -71,9 +73,15 @@ import {
 } from "@/lib/lenses";
 import type { AskScope } from "@/lib/scopes";
 import { canSpeak, speakText, stopSpeaking } from "@/lib/speak";
-import { MAX_AGENT_STEPS, describeToolCall, toolResultError, type AgentToolCall } from "@/lib/agent-tools";
+import {
+  FILE_WRITING_TOOLS,
+  MAX_AGENT_STEPS,
+  describeToolCall,
+  toolResultError,
+  type AgentToolCall,
+} from "@/lib/agent-tools";
 import { runLocalAgentTool } from "@/lib/run-agent-tool";
-import { compactOldToolResults, lastThought, streamAgentStep } from "@/lib/agent-stream";
+import { compactOldToolResults, lastThought, streamAgentStep, type AgentStepRequest } from "@/lib/agent-stream";
 import type { AgentContent } from "@/lib/gemini";
 import {
   changeStats,
@@ -85,6 +93,8 @@ import {
 import { CodeDiff, CodeEditor } from "@/components/code-editor";
 import { TerminalPanel, type TerminalEntry } from "@/components/terminal-panel";
 import { AgentReply } from "@/components/agent-reply";
+import { MediaCard } from "@/components/media-card";
+import { parseMediaRequest, type MediaRequest } from "@/lib/media-intent";
 import { FileIcon, QuickOpen, SearchPanel, Splitter, useStoredWidth } from "@/components/workspace-ui";
 import {
   directWorkspaceHint,
@@ -283,6 +293,9 @@ export default function App() {
   const chatDragStart = useRef(0);
   const [streak, setStreak] = useState({ count: 0, best: 0, quizzes: 0, claims: 0 });
   const abortRef = useRef<AbortController | null>(null);
+  /** Full traces of this session's agent runs (kept in memory only), for 👍/👎 training examples. */
+  const agentTraces = useRef(new Map<string, { chatId: string; trace: Omit<AgentStepRequest, "turns"> & { turns: AgentContent[] } }>());
+  const [rateableRuns, setRateableRuns] = useState<ReadonlySet<string>>(() => new Set());
   const recogRef = useRef<{ stop: () => void } | null>(null);
   const [, tx] = useTransition();
 
@@ -1061,6 +1074,12 @@ export default function App() {
       return;
     }
 
+    const mediaReq = intent === "ask" && !replaceFromUserId ? parseMediaRequest(raw, hasWorkspace) : null;
+    if (mediaReq) {
+      await generateMedia(mediaReq, raw.trim());
+      return;
+    }
+
     const quota = canAsk();
     if (!quota.ok) {
       setError(`Daily demo limit reached (${quota.limit} asks). Try again tomorrow.`);
@@ -1158,7 +1177,7 @@ export default function App() {
             { question: displayQuestion, history, project, focusPath: workspaceFocusPath, turns, model },
             controller.signal,
             (live) => {
-              run = { ...run, thinking: lastThought(live.thought) };
+              run = { ...run, thinking: live.status || lastThought(live.thought) };
               answer = live.text;
               show();
             },
@@ -1177,14 +1196,14 @@ export default function App() {
           const responses: Record<string, unknown>[] = [];
           for (const raw of step.calls) {
             const call =
-              workspaceFocusPath && !raw.args.path && ["read_file", "edit_file", "write_file"].includes(raw.name)
+              workspaceFocusPath && !raw.args.path && (raw.name === "read_file" || FILE_WRITING_TOOLS.has(raw.name))
                 ? { ...raw, args: { ...raw.args, path: workspaceFocusPath } }
                 : raw;
             const label = describeToolCall(call);
             run = { ...run, steps: [...run.steps, { id: call.id, verb: label.verb, target: label.target, status: "running" }] };
             show();
 
-            const writesFile = (call.name === "write_file" || call.name === "edit_file") && Boolean(call.args.path);
+            const writesFile = FILE_WRITING_TOOLS.has(call.name) && Boolean(call.args.path);
             let beforeWrite = "";
             let existed = false;
             if (writesFile) {
@@ -1235,6 +1254,11 @@ export default function App() {
         run = { ...run, working: false, thinking: undefined, endedAt: Date.now() };
         show();
         const finalRun = run;
+        agentTraces.current.set(assistantId, {
+          chatId: next.id,
+          trace: { question: displayQuestion, history, project, focusPath: workspaceFocusPath, turns: [...turns], model },
+        });
+        setRateableRuns((prev) => new Set(prev).add(assistantId));
 
         setAskUsage(recordAsk());
         setStreak(bumpStudyActivity("ask"));
@@ -1361,6 +1385,121 @@ export default function App() {
       abortRef.current = null;
       setTimeout(() => inputRef.current?.focus(), 80);
     }
+  }
+
+  function withMediaPatch(chat: ChatSession, msgId: string, patch: Partial<MediaView>): ChatSession | null {
+    if (!chat.messages.some((m) => m.id === msgId && m.media)) return null;
+    return {
+      ...chat,
+      messages: chat.messages.map((m) => (m.id === msgId && m.media ? { ...m, media: { ...m.media, ...patch } } : m)),
+    };
+  }
+
+  /** Works even if the user has switched to another chat while a video renders. */
+  async function updateMedia(chatId: string, msgId: string, patch: Partial<MediaView>) {
+    setSession((prev) => (prev.id === chatId ? withMediaPatch(prev, msgId, patch) ?? prev : prev));
+    const stored = await getChat(chatId);
+    const updated = stored && withMediaPatch(stored, msgId, patch);
+    if (!updated) return;
+    await saveChat(updated);
+    setSessions((p) => p.map((c) => (c.id === chatId ? updated : c)));
+  }
+
+  async function generateMedia(req: MediaRequest, displayText: string) {
+    const um: Message = { id: newId(), role: "user", content: displayText };
+    const assistantId = newId();
+    const media: MediaView = { kind: req.kind, prompt: req.prompt, aspect: req.aspect, status: "pending", startedAt: Date.now() };
+    const titled =
+      session.title === "New chat" || session.title.startsWith("Chat")
+        ? displayText.slice(0, 48) + (displayText.length > 48 ? "…" : "")
+        : session.title;
+    const next: ChatSession = {
+      ...session,
+      title: titled,
+      documents: getDocuments(session),
+      messages: [...session.messages, um, { id: assistantId, role: "assistant", content: "", media }],
+    };
+    const chatId = next.id;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setQ("");
+    setEditingId(null);
+    setError(null);
+    setAsking(true);
+    await save(next);
+
+    try {
+      const res = await fetch(req.kind === "image" ? "/api/media/image" : "/api/media/video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: req.prompt, aspect: req.aspect }),
+        signal: controller.signal,
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        src?: string;
+        provider?: string;
+        model?: string;
+        jobId?: string;
+        error?: string;
+      };
+      if (!res.ok || data.error) throw new Error(data.error || `Generation failed (${res.status}).`);
+      if (req.kind === "image") {
+        if (!data.src) throw new Error("No image came back. Try again.");
+        await updateMedia(chatId, assistantId, {
+          status: "done",
+          src: data.src,
+          provider: data.provider,
+          model: data.model,
+          endedAt: Date.now(),
+        });
+      } else {
+        if (!data.jobId) throw new Error("The video job did not start. Try again.");
+        await updateMedia(chatId, assistantId, { jobId: data.jobId, model: data.model, provider: data.provider });
+      }
+    } catch (e) {
+      const aborted = e instanceof DOMException && e.name === "AbortError";
+      await updateMedia(chatId, assistantId, {
+        status: "error",
+        error: aborted ? "Stopped." : e instanceof Error ? e.message : "Generation failed.",
+        endedAt: Date.now(),
+      });
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      setAsking(false);
+      setTimeout(() => inputRef.current?.focus(), 80);
+    }
+  }
+
+  async function rateAgentRun(msgId: string, rating: "good" | "bad") {
+    const saved = agentTraces.current.get(msgId);
+    if (!saved) throw new Error("This run can no longer be rated.");
+    const res = await fetch("/api/training/example", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: msgId, rating, ...saved.trace }),
+    });
+    if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error || "Could not save");
+    const patch = (chat: ChatSession): ChatSession => ({
+      ...chat,
+      messages: chat.messages.map((m) => (m.id === msgId && m.agent ? { ...m, agent: { ...m.agent, rating } } : m)),
+    });
+    setSession((prev) => (prev.id === saved.chatId ? patch(prev) : prev));
+    const stored = await getChat(saved.chatId);
+    if (stored) {
+      const updated = patch(stored);
+      await saveChat(updated);
+      setSessions((p) => p.map((c) => (c.id === saved.chatId ? updated : c)));
+    }
+  }
+
+  function regenerateMedia(media: MediaView) {
+    if (asking) return;
+    void generateMedia(
+      { kind: media.kind, prompt: media.prompt, aspect: (media.aspect as MediaRequest["aspect"]) || "1:1" },
+      `/${media.kind} ${media.prompt}`,
+    );
   }
 
   function stopGenerating() {
@@ -2001,6 +2140,9 @@ export default function App() {
                         onCancelEdit={() => setEditingId(null)}
                         onSubmitEdit={submitEdit}
                         onAskNext={(prompt) => ask(prompt)}
+                        onMediaUpdate={(patch) => void updateMedia(session.id, m.id, patch)}
+                        onRateAgent={rateableRuns.has(m.id) ? (rating) => rateAgentRun(m.id, rating) : undefined}
+                        onRegenerateMedia={regenerateMedia}
                         documentText={combinedDocumentText(docs)}
                         chatTitle={session.title}
                         onFindQuote={findInSources}
@@ -2257,6 +2399,8 @@ export default function App() {
           actions={[
             { id: "new", label: "New chat", hint: "Ctrl+N", run: () => { newChat(); setCmdOpen(false); } },
             { id: "export", label: "Export chat", hint: "Ctrl+E", run: () => { setExportOpen(true); setCmdOpen(false); }, disabled: !session.messages.length },
+            { id: "image", label: "Generate image", hint: "/image", run: () => { setQ("/image "); setCmdOpen(false); setTimeout(() => inputRef.current?.focus(), 50); }, disabled: asking },
+            { id: "video", label: "Generate video", hint: "/video", run: () => { setQ("/video "); setCmdOpen(false); setTimeout(() => inputRef.current?.focus(), 50); }, disabled: asking },
             { id: "preview", label: previewOpen ? "Hide preview" : "Show preview", hint: "Ctrl+P", run: () => { setPreviewOpen((v) => !v); setCmdOpen(false); }, disabled: !docs.length },
             { id: "workspace", label: "Connect workspace (direct)", run: () => { void openWorkspaceFolder(); setCmdOpen(false); }, disabled: uploading || openingWorkspace || asking || docs.length >= MAX_DOCS },
             { id: "explain", label: "Explain simply", run: () => { ask(EXPLAIN_PROMPT, undefined, "explain"); setCmdOpen(false); }, disabled: !docs.length || asking },
@@ -3313,6 +3457,9 @@ function Bubble({
   focusPath,
   onApplied,
   onOpenChange,
+  onMediaUpdate,
+  onRegenerateMedia,
+  onRateAgent,
 }: {
   msg: Message;
   idx: number;
@@ -3334,6 +3481,9 @@ function Bubble({
   focusPath?: string | null;
   onApplied?: (path: string, text: string) => void | Promise<void>;
   onOpenChange?: (path: string) => void;
+  onMediaUpdate?: (patch: Partial<MediaView>) => void;
+  onRegenerateMedia?: (media: MediaView) => void;
+  onRateAgent?: (rating: "good" | "bad") => Promise<void>;
 }) {
   const user = msg.role === "user";
   if (user) {
@@ -3372,10 +3522,19 @@ function Bubble({
     );
   }
 
+  if (msg.media) {
+    const media = msg.media;
+    return (
+      <div className="animate-rise max-w-xl" style={{ animationDelay: `${Math.min(idx * 0.04, 0.2)}s` }}>
+        <MediaCard media={media} onUpdate={onMediaUpdate} onRegenerate={() => onRegenerateMedia?.(media)} />
+      </div>
+    );
+  }
+
   if (msg.agent) {
     return (
       <div className="animate-rise" style={{ animationDelay: `${Math.min(idx * 0.04, 0.2)}s` }}>
-        <AgentReply run={msg.agent} answer={msg.content} onOpenFile={onOpenChange} />
+        <AgentReply run={msg.agent} answer={msg.content} onOpenFile={onOpenChange} onRate={onRateAgent} />
       </div>
     );
   }

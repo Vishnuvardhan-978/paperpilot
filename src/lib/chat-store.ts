@@ -19,6 +19,24 @@ export type AgentRunView = {
   model?: string;
   startedAt: number;
   endedAt?: number;
+  /** User's 👍 / 👎, saved as a training example. */
+  rating?: "good" | "bad";
+};
+
+export type MediaView = {
+  kind: "image" | "video";
+  prompt: string;
+  aspect: string;
+  status: "pending" | "done" | "error";
+  /** data: URL for images, /api/media/file/… for videos. */
+  src?: string;
+  provider?: string;
+  model?: string;
+  /** Veo job id while a video renders (lets a reopened chat resume polling). */
+  jobId?: string;
+  error?: string;
+  startedAt: number;
+  endedAt?: number;
 };
 
 export type Message = {
@@ -27,6 +45,8 @@ export type Message = {
   content: string;
   /** Present on coding-agent replies: the tool steps behind the answer. */
   agent?: AgentRunView;
+  /** Present on image / video generation replies. */
+  media?: MediaView;
 };
 
 export type DocumentMeta = {

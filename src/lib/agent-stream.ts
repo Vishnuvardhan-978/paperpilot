@@ -47,7 +47,7 @@ export function compactOldToolResults(turns: AgentContent[], keepRounds = 2, max
 export async function streamAgentStep(
   body: AgentStepRequest,
   signal: AbortSignal,
-  onLive: (live: { thought: string; text: string }) => void,
+  onLive: (live: { thought: string; text: string; status?: string }) => void,
 ): Promise<AgentStepResult> {
   const res = await fetch("/api/agent/step", {
     method: "POST",
@@ -72,8 +72,13 @@ export async function streamAgentStep(
     const msg = JSON.parse(line) as
       | { type: "thought" | "text"; text: string }
       | { type: "reset" }
+      | { type: "wait"; seconds: number; attempt: number; provider?: string }
       | ({ type: "result" } & AgentStepResult)
       | { type: "error"; error: string };
+    if (msg.type === "wait") {
+      onLive({ thought, text, status: `${msg.provider || "AI"} rate limit — retrying in ${msg.seconds}s (attempt ${msg.attempt + 1})…` });
+      return;
+    }
     if (msg.type === "thought") thought += msg.text;
     else if (msg.type === "text") text += msg.text;
     else if (msg.type === "reset") {

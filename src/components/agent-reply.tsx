@@ -47,12 +47,16 @@ export function AgentReply({
   run,
   answer,
   onOpenFile,
+  onRate,
 }: {
   run: AgentRunView;
   answer: string;
   onOpenFile?: (path: string) => void;
+  /** Present while this run's full trace is available (this session). */
+  onRate?: (rating: "good" | "bad") => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const [rateState, setRateState] = useState<"idle" | "saving" | "error">("idle");
   const expanded = run.working || open;
   const edits = run.steps.filter((s) => s.changedPath);
   const errors = run.steps.filter((s) => s.status === "error").length;
@@ -100,6 +104,38 @@ export function AgentReply({
               ✎ {p.split("/").pop()}
             </button>
           ))}
+        </div>
+      )}
+
+      {!run.working && (onRate || run.rating) && (
+        <div className="agent-rate">
+          {run.rating ? (
+            <span className="agent-rate-done">{run.rating === "good" ? "👍 Saved as a good example" : "👎 Saved as a bad example"}</span>
+          ) : (
+            <span>Help train PaperPilot:</span>
+          )}
+          {onRate &&
+            (["good", "bad"] as const).map((r) => (
+              <button
+                key={r}
+                type="button"
+                className={`agent-rate-btn ${run.rating === r ? "is-active" : ""}`}
+                disabled={rateState === "saving" || run.rating === r}
+                title={r === "good" ? "Good answer: save as a training example" : "Bad answer: save so the model learns what to avoid"}
+                onClick={async () => {
+                  setRateState("saving");
+                  try {
+                    await onRate(r);
+                    setRateState("idle");
+                  } catch {
+                    setRateState("error");
+                  }
+                }}
+              >
+                {r === "good" ? "👍" : "👎"}
+              </button>
+            ))}
+          {rateState === "error" && <span className="agent-rate-error">Could not save — try again</span>}
         </div>
       )}
     </div>

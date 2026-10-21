@@ -10,8 +10,35 @@ import {
   type AgentToolCall,
 } from "@/lib/agent-tools";
 import { planFileEdit } from "@/lib/apply-edit";
+import { stripComments } from "@/lib/strip-comments";
 
 const READ_CHUNK_LINES = 600;
+
+/** Inline scripts break on cmd.exe quoting, and the model uses them to bypass reviewed file edits. */
+const INLINE_SCRIPT = /\b(node|python3?|py|deno|bun)(\.exe)?\s+(-e|--eval|-p|--print|-c)\b|\bpowershell(\.exe)?\b.*-(c|command|encodedcommand)\b/i;
+const WRITES_FILES = /writeFile|Set-Content|Out-File|Add-Content|WriteAllText|open\([^)]*['"]w|>\s*[\w./\\-]+\.\w+/i;
+
+function terminalCommandProblem(command: string) {
+  if (INLINE_SCRIPT.test(command) && (WRITES_FILES.test(command) || command.length > 200)) {
+    return "Blocked: long inline scripts (node -e / python -c / powershell -c) break in cmd.exe and must not modify files. Change files with edit_file, write_file or remove_comments.";
+  }
+  if (/[\r\n]/.test(command)) return "Blocked: cmd.exe runs one line at a time. Send a single-line command.";
+  return null;
+}
+
+/** For classic scripts, refuse a comment strip that would turn parseable code into a syntax error. */
+function breaksScript(path: string, before: string, after: string) {
+  if (!/\.(js|cjs)$/i.test(path)) return false;
+  const parses = (code: string) => {
+    try {
+      new Function(code);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return parses(before) && !parses(after);
+}
 
 /** Models sometimes paste read_file output with its "  12| " prefixes; drop them only if every line has one. */
 function stripLineNumbers(text: string) {
@@ -171,8 +198,29 @@ export async function runLocalAgentTool(call: AgentToolCall, ctx: { paths?: stri
           bytes: result.bytes,
         });
       }
+      case "remove_comments": {
+        const { path } = call.args;
+        if (!path) return JSON.stringify({ error: "path required" });
+        const before = (await agentReadFile(path)).text;
+        const { text, removed } = stripComments(path, before);
+        if (!removed) return formatToolResultForModel({ ok: true, path, comments_removed: 0, note: "No comments found." });
+        if (breaksScript(path, before, text)) {
+          return JSON.stringify({ error: "Removing comments would break this script's syntax; file left unchanged. Remove them with edit_file instead." });
+        }
+        const result = await agentWriteFile(path, text);
+        return formatToolResultForModel({
+          ok: true,
+          path,
+          comments_removed: removed,
+          lines_before: before.split(/\r?\n/).length,
+          lines_after: text.split(/\r?\n/).length,
+          backup: result.backup || null,
+        });
+      }
       case "run_terminal": {
         if (!call.args.command) return JSON.stringify({ error: "command required" });
+        const problem = terminalCommandProblem(call.args.command);
+        if (problem) return JSON.stringify({ error: problem });
         const data = await agentExec(call.args.command, call.args.cwd || ".");
         return formatToolResultForModel(data);
       }

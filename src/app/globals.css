@@ -1178,6 +1178,38 @@ body.is-resizing .monaco-editor {
 .agent-file-chip:hover {
   background: rgba(0, 212, 170, 0.16);
 }
+.agent-rate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: #415570;
+}
+.agent-rate-done {
+  color: #8ca3be;
+}
+.agent-rate-btn {
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.75;
+  transition: opacity 0.12s, background 0.12s, border-color 0.12s;
+}
+.agent-rate-btn:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.05);
+}
+.agent-rate-btn.is-active {
+  opacity: 1;
+  border-color: rgba(0, 212, 170, 0.4);
+  background: rgba(0, 212, 170, 0.1);
+}
+.agent-rate-error {
+  color: #ff9b9b;
+}
 
 /* IDE chrome: toolbar buttons, change list, review bar */
 .pane-btn {

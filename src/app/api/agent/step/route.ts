@@ -1,4 +1,5 @@
-import { formatAskError, streamAgentTurn, type AgentContent } from "@/lib/gemini";
+import { formatAskError } from "@/lib/gemini";
+import { streamAgentTurn, type AgentContent } from "@/lib/ai";
 import { AGENT_FUNCTIONS, buildAgentSystemPrompt, buildAgentUserMessage, toToolCall } from "@/lib/agent-tools";
 import { allowRequest, clientKeyFromRequest } from "@/lib/api-limit";
 

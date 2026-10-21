@@ -1,7 +1,10 @@
 "use client";
 
-import { DiffEditor, Editor, type BeforeMount, type OnMount } from "@monaco-editor/react";
+import { DiffEditor, Editor, loader, type BeforeMount, type DiffOnMount, type OnMount } from "@monaco-editor/react";
 import { useEffect, useRef, useState } from "react";
+
+// Served from public/monaco (copied by scripts/copy-monaco.mjs) so no internet is needed.
+loader.config({ paths: { vs: "/monaco/vs" } });
 
 const THEME = "paperpilot-dark";
 
@@ -152,6 +155,21 @@ export function CodeDiff({
   original: string;
   modified: string;
 }) {
+  const diffRef = useRef<Parameters<DiffOnMount>[0] | null>(null);
+
+  // The wrapper disposes the models before resetting the widget, which throws; detach first, then dispose.
+  useEffect(
+    () => () => {
+      const editor = diffRef.current;
+      if (!editor) return;
+      const models = editor.getModel();
+      editor.setModel(null);
+      models?.original.dispose();
+      models?.modified.dispose();
+    },
+    [],
+  );
+
   return (
     <DiffEditor
       original={original}
@@ -159,6 +177,11 @@ export function CodeDiff({
       language={languageForPath(path)}
       theme={THEME}
       beforeMount={defineTheme}
+      onMount={(editor) => {
+        diffRef.current = editor;
+      }}
+      keepCurrentOriginalModel
+      keepCurrentModifiedModel
       loading={<Loading />}
       options={{
         ...BASE_OPTIONS,

@@ -7,6 +7,7 @@ export type AgentToolName =
   | "search_code"
   | "edit_file"
   | "write_file"
+  | "remove_comments"
   | "run_terminal";
 
 export type AgentToolCall = {
@@ -28,8 +29,12 @@ const TOOL_NAMES = new Set<AgentToolName>([
   "search_code",
   "edit_file",
   "write_file",
+  "remove_comments",
   "run_terminal",
 ]);
+
+/** Tools that change a file on disk (recorded for review / undo). */
+export const FILE_WRITING_TOOLS = new Set<AgentToolName>(["edit_file", "write_file", "remove_comments"]);
 
 /** Model round-trips per request (each round may run several tools). */
 export const MAX_AGENT_STEPS = 25;
@@ -117,9 +122,19 @@ export const AGENT_FUNCTIONS: Record<string, unknown>[] = [
     },
   },
   {
+    name: "remove_comments",
+    description:
+      "Remove all comments from one file, safely (strings, URLs, regexes and templates are left intact). Supports JS/TS, Java, C/C++/C#, Kotlin, CSS/SCSS, HTML, XML and JSP (including <script>, <style> and <% %> blocks). Always use this for comment removal instead of edit_file, scripts or the terminal.",
+    parametersJsonSchema: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+    },
+  },
+  {
     name: "run_terminal",
     description:
-      "Run a short shell command in the project (Windows cmd.exe), e.g. git status, npm test, mvn -q compile. Not for reading or editing files. Times out after ~45s.",
+      "Run a short one-line shell command in the project (Windows cmd.exe), e.g. git status, npm test, mvn -q compile. Never use it to read, create or modify files, and never run inline scripts (node -e, python -c). Times out after ~45s.",
     parametersJsonSchema: {
       type: "object",
       properties: { command: { type: "string" }, cwd: { type: "string", description: "relative folder, default \".\"" } },
@@ -179,14 +194,16 @@ How to work:
 
 Rules:
 - When the user says "this file", they mean the focused file.
-- Prefer several small precise edits over rewriting. write_file is only for new files.
-- Big jobs (e.g. remove all comments in a long file): read the whole file in chunks, then apply edits in batches of ~20 per edit_file call until done.
+- Prefer several small precise edits over rewriting. write_file is only for new files the user asked for.
+- Removing comments: call remove_comments once per file. Do not strip comments by hand or with a script.
+- Never create helper or scratch scripts in the project, and never change files through run_terminal. Files change only through edit_file, write_file or remove_comments.
+- Other big jobs: read the file in chunks, then apply edit_file in batches of ~20 edits per call until done.
 - If a tool returns an error, read it and change approach — never repeat the identical failing call.
 - If the request is a question (no change needed), answer it after looking at the code.
 - Short follow-ups like "continue" or "do the same for X" refer to the earlier conversation.
 
 Project: ${opts.projectName}${opts.root ? ` (${opts.root})` : ""}
-Platform: Windows
+Platform: Windows (run_terminal uses cmd.exe: one-line commands only)
 ${opts.focusPath ? `Focused file (open in the editor): ${opts.focusPath}\n` : ""}
 Project files (${opts.paths.length}${more > 0 ? `, first ${shown.length} shown — use find_files for the rest` : ""}):
 ${shown.join("\n")}`;
@@ -239,6 +256,8 @@ export function describeToolCall(call: AgentToolCall): { verb: string; target: s
     }
     case "write_file":
       return { verb: "Write", target: a.path || "" };
+    case "remove_comments":
+      return { verb: "Remove comments", target: a.path || "" };
     case "run_terminal":
       return { verb: "Run", target: a.command || "" };
     default:

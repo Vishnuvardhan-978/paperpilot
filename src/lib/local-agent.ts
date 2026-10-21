@@ -9,6 +9,46 @@ export function agentBaseUrl() {
   }
 }
 
+const TOKEN_HEADER = "X-PaperPilot-Token";
+let tokenPromise: Promise<string> | null = null;
+
+async function fetchAgentToken() {
+  try {
+    const manual = localStorage.getItem("paperpilot-agent-token");
+    if (manual) return manual;
+  } catch {
+    /* storage blocked */
+  }
+  const r = await fetch("/api/agent/token", { cache: "no-store" });
+  const data = (await r.json().catch(() => ({}))) as { token?: string; error?: string };
+  if (!r.ok || !data.token) throw new Error(data.error || "Local agent offline. Run: npm run agent");
+  return data.token;
+}
+
+function agentToken(refresh = false) {
+  if (refresh || !tokenPromise) {
+    tokenPromise = fetchAgentToken().catch((e) => {
+      tokenPromise = null;
+      throw e;
+    });
+  }
+  return tokenPromise;
+}
+
+/** Every agent call carries the shared token; a 401 means the agent restarted with a new one. */
+async function agentFetch(pathAndQuery: string, init: RequestInit = {}) {
+  const call = async (token: string) =>
+    fetch(`${agentBaseUrl()}${pathAndQuery}`, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string> | undefined), [TOKEN_HEADER]: token },
+    });
+  const r = await call(await agentToken());
+  if (r.status !== 401) return r;
+  return call(await agentToken(true));
+}
+
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
 export type AgentHealth = {
   ok: boolean;
   name?: string;
@@ -19,11 +59,10 @@ export type AgentHealth = {
 };
 
 export async function checkLocalAgent(timeoutMs = 2500): Promise<AgentHealth> {
-  const base = agentBaseUrl();
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const r = await fetch(`${base}/health`, { signal: ctrl.signal });
+    const r = await agentFetch("/health", { signal: ctrl.signal });
     const data = (await r.json().catch(() => ({}))) as AgentHealth;
     if (!r.ok) return { ok: false, error: data.error || `Agent HTTP ${r.status}` };
     return { ...data, ok: true };
@@ -33,7 +72,9 @@ export async function checkLocalAgent(timeoutMs = 2500): Promise<AgentHealth> {
       error:
         e instanceof Error && e.name === "AbortError"
           ? "Local agent not reachable. Run: npm run agent"
-          : "Local agent offline. Run: npm run agent",
+          : e instanceof Error && /agent/i.test(e.message)
+            ? e.message
+            : "Local agent offline. Run: npm run agent",
     };
   } finally {
     clearTimeout(t);
@@ -41,8 +82,7 @@ export async function checkLocalAgent(timeoutMs = 2500): Promise<AgentHealth> {
 }
 
 export async function agentListDir(relPath = ".") {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/list?path=${encodeURIComponent(relPath)}`);
+  const r = await agentFetch(`/list?path=${encodeURIComponent(relPath)}`);
   const data = (await r.json().catch(() => ({}))) as {
     entries?: { name: string; kind: string; path: string }[];
     error?: string;
@@ -52,8 +92,7 @@ export async function agentListDir(relPath = ".") {
 }
 
 export async function agentReadFile(relPath: string) {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/read?path=${encodeURIComponent(relPath)}`);
+  const r = await agentFetch(`/read?path=${encodeURIComponent(relPath)}`);
   const data = (await r.json().catch(() => ({}))) as {
     path?: string;
     text?: string;
@@ -66,10 +105,9 @@ export async function agentReadFile(relPath: string) {
 }
 
 export async function agentWriteFile(relPath: string, text: string, opts: { backup?: boolean } = {}) {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/write`, {
+  const r = await agentFetch("/write", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify({ path: relPath, text, backup: opts.backup ?? true }),
   });
   const data = (await r.json().catch(() => ({}))) as {
@@ -87,10 +125,9 @@ export async function agentWriteFile(relPath: string, text: string, opts: { back
 
 /** Copy `<path>.ppbak` back over the file (one-level undo that survives a page refresh). */
 export async function agentRestoreBackup(relPath: string) {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/restore`, {
+  const r = await agentFetch("/restore", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify({ path: relPath }),
   });
   const data = (await r.json().catch(() => ({}))) as { ok?: boolean; text?: string; error?: string };
@@ -99,10 +136,9 @@ export async function agentRestoreBackup(relPath: string) {
 }
 
 export async function agentDeleteFile(relPath: string) {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/delete`, {
+  const r = await agentFetch("/delete", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify({ path: relPath }),
   });
   const data = (await r.json().catch(() => ({}))) as { ok?: boolean; error?: string };
@@ -114,9 +150,8 @@ export async function agentSearch(
   relPath = ".",
   opts: { regex?: boolean; caseSensitive?: boolean } = {},
 ) {
-  const base = agentBaseUrl();
-  const r = await fetch(
-    `${base}/search?q=${encodeURIComponent(query)}&path=${encodeURIComponent(relPath)}${opts.regex ? "&regex=1" : ""}${opts.caseSensitive ? "&case=1" : ""}`,
+  const r = await agentFetch(
+    `/search?q=${encodeURIComponent(query)}&path=${encodeURIComponent(relPath)}${opts.regex ? "&regex=1" : ""}${opts.caseSensitive ? "&case=1" : ""}`,
   );
   const data = (await r.json().catch(() => ({}))) as {
     query?: string;
@@ -129,10 +164,9 @@ export async function agentSearch(
 }
 
 export async function agentExec(command: string, cwd = ".") {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/exec`, {
+  const r = await agentFetch("/exec", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify({ command, cwd }),
   });
   const data = (await r.json().catch(() => ({}))) as {
@@ -151,10 +185,9 @@ export async function agentExec(command: string, cwd = ".") {
 }
 
 export async function agentSetWorkspace(folderPath: string) {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/workspace`, {
+  const r = await agentFetch("/workspace", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: JSON_HEADERS,
     body: JSON.stringify({ path: folderPath }),
   });
   const data = (await r.json().catch(() => ({}))) as {
@@ -168,8 +201,7 @@ export async function agentSetWorkspace(folderPath: string) {
 
 /** Opens the OS folder dialog on the agent's machine. Returns null if cancelled. */
 export async function agentPickFolder(): Promise<string | null> {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/pick-folder`, { method: "POST" });
+  const r = await agentFetch("/pick-folder", { method: "POST" });
   if (r.status === 404) throw new Error("PICK_UNSUPPORTED");
   const data = (await r.json().catch(() => ({}))) as {
     ok?: boolean;
@@ -185,8 +217,7 @@ export async function agentPickFolder(): Promise<string | null> {
 }
 
 export async function agentTree() {
-  const base = agentBaseUrl();
-  const r = await fetch(`${base}/tree`);
+  const r = await agentFetch("/tree");
   const data = (await r.json().catch(() => ({}))) as {
     root?: string;
     name?: string;
