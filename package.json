@@ -18,7 +18,8 @@
     "test:ai": "node scripts/e2e-ai.mjs",
     "keys": "node scripts/pp-keys.mjs",
     "training:export": "node scripts/training-export.mjs",
-    "test:e2e": "node scripts/e2e-agent.mjs"
+    "test:e2e": "node scripts/e2e-agent.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",
@@ -45,6 +46,7 @@
     "eslint-config-next": "16.3.5",
     "playwright-core": "^1.64.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.7"
   }
 }
