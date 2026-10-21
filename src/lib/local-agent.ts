@@ -35,12 +35,24 @@ function agentToken(refresh = false) {
   return tokenPromise;
 }
 
+const ROOT_HEADER = "X-PaperPilot-Root";
+let tabRoot: string | null = null;
+
+/** This tab's project folder; sent with every call so other tabs can't redirect the agent. */
+export function setAgentRoot(root: string | null) {
+  tabRoot = root;
+}
+
 /** Every agent call carries the shared token; a 401 means the agent restarted with a new one. */
 async function agentFetch(pathAndQuery: string, init: RequestInit = {}) {
   const call = async (token: string) =>
     fetch(`${agentBaseUrl()}${pathAndQuery}`, {
       ...init,
-      headers: { ...(init.headers as Record<string, string> | undefined), [TOKEN_HEADER]: token },
+      headers: {
+        ...(init.headers as Record<string, string> | undefined),
+        [TOKEN_HEADER]: token,
+        ...(tabRoot ? { [ROOT_HEADER]: encodeURIComponent(tabRoot) } : {}),
+      },
     });
   const r = await call(await agentToken());
   if (r.status !== 401) return r;

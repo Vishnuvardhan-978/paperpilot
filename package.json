@@ -19,7 +19,8 @@
     "keys": "node scripts/pp-keys.mjs",
     "training:export": "node scripts/training-export.mjs",
     "test:e2e": "node scripts/e2e-agent.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e:features": "node scripts/e2e-features.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

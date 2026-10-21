@@ -12,6 +12,7 @@ import path from "path";
 import crypto from "crypto";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
+import { AsyncLocalStorage } from "async_hooks";
 
 const AGENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 let pickingFolder = false;
@@ -73,8 +74,33 @@ function isAllowedHost(host) {
   const h = String(host || "").toLowerCase();
   return h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `[::1]:${PORT}`;
 }
-/** Mutable so the UI can point at a folder without restarting (Cursor-like). */
-let ROOT = path.resolve(process.env.PAPERPILOT_WORKSPACE || process.cwd());
+/** Folder used when a request doesn't name one; POST /workspace changes it. */
+let DEFAULT_ROOT = path.resolve(process.env.PAPERPILOT_WORKSPACE || process.cwd());
+/**
+ * Each app tab sends its own project in X-PaperPilot-Root, so two tabs on different
+ * projects never redirect each other's reads, edits or commands.
+ */
+const ROOT_HEADER = "x-paperpilot-root";
+const rootStore = new AsyncLocalStorage();
+const currentRoot = () => rootStore.getStore() || DEFAULT_ROOT;
+
+function requestRoot(req) {
+  const raw = String(req.headers[ROOT_HEADER] || "").trim();
+  if (!raw) return null;
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    /* use as sent */
+  }
+  if (!path.isAbsolute(decoded)) return null;
+  const resolved = path.resolve(decoded);
+  try {
+    return fs.statSync(resolved).isDirectory() ? resolved : null;
+  } catch {
+    return null;
+  }
+}
 const SKIP_DIRS = new Set([
   "node_modules",
   ".git",
@@ -103,7 +129,7 @@ function corsHeaders(res) {
     Vary: "Origin",
     "Access-Control-Allow-Origin": res.corsOrigin,
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": `Content-Type, ${TOKEN_HEADER}`,
+    "Access-Control-Allow-Headers": `Content-Type, ${TOKEN_HEADER}, ${ROOT_HEADER}`,
     "Access-Control-Allow-Private-Network": "true",
   };
 }
@@ -121,9 +147,9 @@ function send(res, status, body) {
 function safeJoin(rel) {
   const clean = String(rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
   if (clean.split("/").includes("..")) throw new Error("Path escape blocked");
-  const full = path.resolve(ROOT, clean);
-  const rootCmp = ROOT.endsWith(path.sep) ? ROOT : ROOT + path.sep;
-  if (full !== ROOT && !full.toLowerCase().startsWith(rootCmp.toLowerCase())) {
+  const full = path.resolve(currentRoot(), clean);
+  const rootCmp = currentRoot().endsWith(path.sep) ? currentRoot() : currentRoot() + path.sep;
+  if (full !== currentRoot() && !full.toLowerCase().startsWith(rootCmp.toLowerCase())) {
     throw new Error("Path outside workspace");
   }
   return full;
@@ -133,7 +159,7 @@ function safeJoin(rel) {
 function resolveInsideRoot(rel) {
   const clean = String(rel || "").replace(/\\/g, "/").replace(/^\/+/, "");
   const options = [clean];
-  const base = path.basename(ROOT);
+  const base = path.basename(currentRoot());
   let cur = clean;
   const prefix = base.toLowerCase() + "/";
   while (base && cur.toLowerCase().startsWith(prefix)) {
@@ -206,12 +232,12 @@ function walkTreePaths(dir, acc = [], depth = 0) {
       if (d.name.startsWith(".") && d.name !== ".env.example" && d.name !== ".gitignore") continue;
       if (d.name.endsWith(".ppbak")) continue;
       const full = path.join(dir, d.name);
-      let rel = path.relative(ROOT, full).replace(/\\/g, "/");
-      const base = path.basename(ROOT);
+      let rel = path.relative(currentRoot(), full).replace(/\\/g, "/");
+      const base = path.basename(currentRoot());
       const prefix = base.toLowerCase() + "/";
       if (base && rel.toLowerCase().startsWith(prefix)) {
         const stripped = rel.slice(base.length + 1);
-        if (fs.existsSync(path.join(ROOT, stripped)) && !fs.existsSync(path.join(ROOT, rel))) {
+        if (fs.existsSync(path.join(currentRoot(), stripped)) && !fs.existsSync(path.join(currentRoot(), rel))) {
           rel = stripped;
         }
       }
@@ -256,7 +282,7 @@ function runSearch(query, relRoot = ".", opts = {}) {
       if (hits.length >= MAX_SEARCH_HITS) break;
       if (matches(lines[i])) {
         hits.push({
-          path: path.relative(ROOT, full).replace(/\\/g, "/"),
+          path: path.relative(currentRoot(), full).replace(/\\/g, "/"),
           line: i + 1,
           text: lines[i].slice(0, 240),
         });
@@ -308,7 +334,7 @@ function pickFolderNative() {
 /** git with an argument list (no shell), run in the workspace root. */
 function runGit(args, maxOut = 400_000) {
   return new Promise((resolve) => {
-    const child = spawn("git", args, { cwd: ROOT, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" } });
+    const child = spawn("git", args, { cwd: currentRoot(), windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (b) => {
@@ -394,7 +420,7 @@ function runExec(command, cwdRel = ".") {
         ok: code === 0 && !killed,
         code: killed ? -1 : code,
         timedOut: killed,
-        cwd: path.relative(ROOT, cwd).replace(/\\/g, "/") || ".",
+        cwd: path.relative(currentRoot(), cwd).replace(/\\/g, "/") || ".",
         command: cmd,
         stdout: stdout.slice(0, MAX_EXEC_OUT),
         stderr: stderr.slice(0, MAX_EXEC_OUT),
@@ -406,7 +432,7 @@ function runExec(command, cwdRel = ".") {
         ok: false,
         code: -1,
         timedOut: false,
-        cwd: path.relative(ROOT, cwd).replace(/\\/g, "/") || ".",
+        cwd: path.relative(currentRoot(), cwd).replace(/\\/g, "/") || ".",
         command: cmd,
         stdout: "",
         stderr: e instanceof Error ? e.message : "exec failed",
@@ -415,7 +441,12 @@ function runExec(command, cwdRel = ".") {
   });
 }
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => {
+  const root = requestRoot(req);
+  return root ? rootStore.run(root, () => handle(req, res)) : handle(req, res);
+});
+
+async function handle(req, res) {
   const origin = req.headers.origin;
   if (!isAllowedHost(req.headers.host) || (origin && !isAllowedOrigin(origin))) {
     send(res, 403, { error: "Forbidden: requests are only accepted from PaperPilot on this machine." });
@@ -476,15 +507,15 @@ const server = http.createServer(async (req, res) => {
       send(res, 200, {
         ok: true,
         name: "PaperPilot Local Agent",
-        workspace: ROOT,
+        workspace: currentRoot(),
         phase: 2,
-        capabilities: ["read", "write", "list", "search", "exec", "tree", "workspace", "pick-folder", "restore", "delete", "git"],
+        capabilities: ["read", "write", "list", "search", "exec", "tree", "workspace", "pick-folder", "restore", "delete", "git", "root-header"],
       });
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/workspace") {
-      send(res, 200, { workspace: ROOT });
+      send(res, 200, { workspace: currentRoot() });
       return;
     }
 
@@ -509,8 +540,8 @@ const server = http.createServer(async (req, res) => {
         send(res, 400, { error: "Selected folder not found" });
         return;
       }
-      ROOT = resolved;
-      send(res, 200, { ok: true, workspace: ROOT });
+      DEFAULT_ROOT = resolved;
+      send(res, 200, { ok: true, workspace: resolved });
       return;
     }
 
@@ -526,16 +557,16 @@ const server = http.createServer(async (req, res) => {
         send(res, 400, { error: "Folder not found on this machine" });
         return;
       }
-      ROOT = resolved;
-      send(res, 200, { ok: true, workspace: ROOT });
+      DEFAULT_ROOT = resolved;
+      send(res, 200, { ok: true, workspace: resolved });
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/tree") {
-      const paths = walkTreePaths(ROOT, []);
+      const paths = walkTreePaths(currentRoot(), []);
       send(res, 200, {
-        root: ROOT,
-        name: path.basename(ROOT) || ROOT,
+        root: currentRoot(),
+        name: path.basename(currentRoot()) || currentRoot(),
         paths,
         fileCount: paths.length,
         truncated: paths.length >= MAX_TREE_FILES,
@@ -549,9 +580,9 @@ const server = http.createServer(async (req, res) => {
       const entries = fs.readdirSync(dir, { withFileTypes: true }).map((d) => ({
         name: d.name,
         kind: d.isDirectory() ? "dir" : "file",
-        path: path.relative(ROOT, path.join(dir, d.name)).replace(/\\/g, "/"),
+        path: path.relative(currentRoot(), path.join(dir, d.name)).replace(/\\/g, "/"),
       }));
-      send(res, 200, { root: ROOT, path: rel, entries });
+      send(res, 200, { root: currentRoot(), path: rel, entries });
       return;
     }
 
@@ -588,7 +619,7 @@ const server = http.createServer(async (req, res) => {
       fs.mkdirSync(path.dirname(full), { recursive: true });
       let backup = null;
       if (fs.existsSync(full) && body.backup !== false) {
-        backup = `${path.relative(ROOT, full).replace(/\\/g, "/")}.ppbak`;
+        backup = `${path.relative(currentRoot(), full).replace(/\\/g, "/")}.ppbak`;
         fs.copyFileSync(full, `${full}.ppbak`);
       }
       fs.writeFileSync(full, body.text, "utf8");
@@ -704,11 +735,11 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     send(res, 500, { error: e instanceof Error ? e.message : "Agent error" });
   }
-});
+}
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`PaperPilot Local Agent (phase 2) on http://127.0.0.1:${PORT}`);
-  console.log(`Workspace root: ${ROOT}`);
+  console.log(`Workspace root: ${currentRoot()}`);
   console.log(`Tools: list read write search exec`);
   console.log(`Token file: ${TOKEN_FILE} (only PaperPilot pages on this machine are accepted)`);
   console.log(`Set PAPERPILOT_WORKSPACE to point at a project folder.`);

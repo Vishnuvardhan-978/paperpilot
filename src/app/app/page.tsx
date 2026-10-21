@@ -124,6 +124,7 @@ import {
   agentReadFile,
   agentRestoreBackup,
   agentSetWorkspace,
+  setAgentRoot,
   agentTree,
   agentWriteFile,
   checkLocalAgent,
@@ -570,6 +571,10 @@ export default function App() {
   }, [q]);
 
   useEffect(() => {
+    setAgentRoot(hasWorkspace ? workspaceRoot : null);
+  }, [hasWorkspace, workspaceRoot]);
+
+  useEffect(() => {
     let alive = true;
     if (!hasWorkspace) {
       queueMicrotask(() => {
@@ -583,8 +588,10 @@ export default function App() {
       void checkLocalAgent().then(async (h) => {
         if (!alive) return;
         setAgentOnline(h.ok);
-        // The agent restarts in its own cwd; point it back at this chat's project.
-        if (!h.ok || !workspaceRoot || h.workspace?.toLowerCase() === workspaceRoot.toLowerCase()) return;
+        // Agents that read X-PaperPilot-Root already work in this tab's project. Older ones keep one
+        // shared folder, so point it back at this chat's project.
+        if (!h.ok || !workspaceRoot || h.capabilities?.includes("root-header")) return;
+        if (h.workspace?.toLowerCase() === workspaceRoot.toLowerCase()) return;
         try {
           await agentSetWorkspace(workspaceRoot);
           if (alive) setFileEpoch((n) => n + 1);
