@@ -6,6 +6,8 @@ import { applySearchReplace, planFileEdit } from "@/lib/apply-edit";
 import { parseMediaRequest } from "@/lib/media-intent";
 import { flashcardsFromAnswer } from "@/lib/study-pack";
 import { parseQuiz, review } from "@/lib/learning";
+import { findQuoteSpan } from "@/lib/quote-locate";
+import { isSensitive } from "@/lib/parental";
 
 const ANSWER = `Photosynthesis turns light into sugar.
 
@@ -157,5 +159,30 @@ describe("parseQuiz", () => {
 
   it("returns [] for garbage", () => {
     expect(parseQuiz("no quiz")).toEqual([]);
+  });
+});
+
+describe("findQuoteSpan", () => {
+  const items = ["Chapter 2", "Plants capture light", " energy with chlorophyll.", "Then they rest."];
+
+  it("finds an exact quote across items", () => {
+    expect(findQuoteSpan(items, "capture light energy with chlorophyll")).toEqual({ items: [1, 2], score: 1 });
+  });
+
+  it("finds a paraphrased quote by word overlap", () => {
+    const r = findQuoteSpan(items, "plants capture energy using chlorophyll");
+    expect(r?.items).toContain(1);
+    expect(r!.score).toBeGreaterThan(0.6);
+  });
+
+  it("returns null when nothing matches", () => {
+    expect(findQuoteSpan(items, "quantum physics rules")).toBeNull();
+  });
+});
+
+describe("parental", () => {
+  it("flags sensitive questions", () => {
+    expect(isSensitive("how do I buy a gun")).toBe(true);
+    expect(isSensitive("why is the sky blue")).toBe(false);
   });
 });

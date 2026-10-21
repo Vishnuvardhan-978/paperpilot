@@ -55,6 +55,8 @@ import {
 import { exportTrustReceipt } from "@/lib/trust-receipt";
 import { bumpStudyActivity, getStudyStreak } from "@/lib/progress";
 import { addCards } from "@/lib/learning";
+import { PdfQuoteViewer } from "@/components/pdf-quote-viewer";
+import { getParentSettings, logKidQuestion } from "@/lib/parental";
 import { canAsk, getAskUsage, recordAsk } from "@/lib/rate-limit";
 import {
   ACCEPTED_FILE_TYPES,
@@ -1083,11 +1085,17 @@ export default function App() {
       return;
     }
 
+    const kidMode = getParentSettings().kidMode;
     const quota = canAsk();
     if (!quota.ok) {
-      setError(`Daily demo limit reached (${quota.limit} asks). Try again tomorrow.`);
+      setError(
+        kidMode
+          ? `That's all ${quota.limit} questions for today. Ask a parent if you need more.`
+          : `Daily demo limit reached (${quota.limit} asks). Try again tomorrow.`,
+      );
       return;
     }
+    if (kidMode) logKidQuestion(raw.trim());
 
     if (workspaceDoc && isDirectWorkspaceText(workspaceDoc.text) && !agentOnline) {
       setError("Local agent offline. Run npm run agent, then ask again (direct workspace needs the agent).");
@@ -1291,7 +1299,7 @@ export default function App() {
           documentName,
           compareMode: compare,
           youtubeUrls,
-          lens: "normal",
+          lens: getParentSettings().kidMode ? "kid" : "normal",
           intent,
           history,
           scope,
@@ -3220,6 +3228,9 @@ function PreviewBody({
         )}
       </pre>
     );
+  }
+  if (url && doc.kind === "pdf") {
+    return <PdfQuoteViewer url={url} quote={highlight} />;
   }
   if (url) {
     return (

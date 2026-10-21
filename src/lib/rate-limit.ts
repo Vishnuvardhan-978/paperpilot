@@ -1,5 +1,13 @@
+import { getParentSettings } from "@/lib/parental";
+
 const KEY = "paperpilot-daily-asks";
 export const DAILY_ASK_LIMIT = 40;
+
+/** Kid mode uses the parent's limit instead of the default. */
+function dailyLimit() {
+  const p = getParentSettings();
+  return p.kidMode ? p.dailyLimit : DAILY_ASK_LIMIT;
+}
 
 type DayBucket = { day: string; count: number };
 
@@ -28,8 +36,8 @@ export function getAskUsage() {
   const bucket = readBucket();
   return {
     used: bucket.count,
-    limit: DAILY_ASK_LIMIT,
-    remaining: Math.max(0, DAILY_ASK_LIMIT - bucket.count),
+    limit: dailyLimit(),
+    remaining: Math.max(0, dailyLimit() - bucket.count),
   };
 }
 
@@ -48,7 +56,7 @@ export function recordAsk() {
   writeBucket(next);
   return {
     used: next.count,
-    limit: DAILY_ASK_LIMIT,
-    remaining: Math.max(0, DAILY_ASK_LIMIT - next.count),
+    limit: dailyLimit(),
+    remaining: Math.max(0, dailyLimit() - next.count),
   };
 }
