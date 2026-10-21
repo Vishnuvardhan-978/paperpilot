@@ -1,9 +1,5 @@
-import {
-  buildAskParts,
-  formatAskError,
-  streamWithFallback,
-  type AskHistoryTurn,
-} from "@/lib/gemini";
+import { buildAskParts, formatAskError, type AskHistoryTurn } from "@/lib/gemini";
+import { streamText } from "@/lib/ai";
 import type { AskIntent, LensId } from "@/lib/lenses";
 import type { AskScope } from "@/lib/scopes";
 import { allowRequest, clientKeyFromRequest } from "@/lib/api-limit";
@@ -107,7 +103,7 @@ export async function POST(request: Request) {
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          for await (const chunk of streamWithFallback(parts)) {
+          for await (const chunk of streamText(parts)) {
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify({ text: chunk })}\n\n`),
             );

@@ -7,23 +7,27 @@ import {
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
+import { ProviderError } from "@/lib/ai/openai-compat";
 import type { AskIntent, LensId } from "@/lib/lenses";
 import { lensSystemRules, responseShapeInstructions } from "@/lib/lenses";
 import type { AskScope } from "@/lib/scopes";
 
+// gemini-2.5-* is closed to new API keys; kept last for older keys.
 const MODEL_CANDIDATES = [
-  "gemini-2.5-flash",
+  "gemini-flash-latest",
+  "gemini-3.8-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash-lite",
-  "gemini-flash-latest",
+  "gemini-2.5-flash",
 ];
 
 /** Prefer these for PDF/image OCR (document understanding). */
 const OCR_MODEL_CANDIDATES = [
+  "gemini-flash-latest",
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
   "gemini-2.5-flash",
   "gemini-2.0-flash",
-  "gemini-3.6-flash",
-  "gemini-flash-latest",
 ];
 
 export type ContentPart =
@@ -31,7 +35,7 @@ export type ContentPart =
   | { inlineData: { mimeType: string; data: string } }
   | { fileData: { fileUri: string; mimeType?: string } };
 
-function getClient() {
+export function getClient() {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -177,12 +181,50 @@ export async function generateTextOnce(input: string | ContentPart[]): Promise<s
 /** Coding agent: strongest first; missing models are skipped. Override with GEMINI_AGENT_MODEL. */
 function agentModelCandidates() {
   const preferred = process.env.GEMINI_AGENT_MODEL?.trim();
-  const list = ["gemini-pro-latest", "gemini-2.5-pro", "gemini-3.6-flash", "gemini-flash-latest", "gemini-2.5-flash"];
-  return preferred ? [preferred, ...list.filter((m) => m !== preferred)] : list;
+  const list = [
+    "gemini-pro-latest",
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
+    "gemini-3.6-flash",
+    ...suggestedAgentModels,
+    "gemini-2.5-flash",
+  ];
+  const unique = [...new Set(preferred ? [preferred, ...list] : list)];
+  return unique;
 }
 
 /** Models this API key can't use right now (missing / no quota) → skip until the timestamp. */
 const unavailableAgentModels = new Map<string, number>();
+/** Replacements Gemini names in its "model retired, use models/X" errors. */
+const suggestedAgentModels = new Set<string>();
+
+function isDailyQuota(error: unknown) {
+  const msg = errorMessage(error);
+  return /quota/i.test(msg) && /per.?day/i.test(msg);
+}
+
+/** Short reason for logs: status plus which quota (per minute / per day) and its limit. */
+function quotaSummary(error: unknown) {
+  const msg = errorMessage(error).replace(/\\"/g, '"');
+  const code = /"code":\s*(\d{3})/.exec(msg)?.[1] ?? "?";
+  const quota = /quotaId"?\s*:\s*"([\w-]+)"/.exec(msg)?.[1];
+  const limit = /limit:\s*(\d+)/.exec(msg)?.[1];
+  const retry = retryDelayMs(error);
+  if (code === "429") return `429 quota ${quota ?? "?"}${limit ? ` (limit ${limit})` : ""}${retry ? `, retry in ${Math.round(retry / 1000)}s` : ""}`;
+  return `${code} ${/"message":\s*"([^"]{0,140})/.exec(msg)?.[1] ?? msg.slice(0, 140)}`;
+}
+
+function suggestedReplacement(error: unknown) {
+  return /use\s+models\/([\w.-]+)/i.exec(errorMessage(error))?.[1] ?? null;
+}
+
+/** Gemini sometimes accepts a request and then never answers; give up on that attempt and retry. */
+const FIRST_CHUNK_TIMEOUT_MS = 60_000;
+const STALL_TIMEOUT_MS = 90_000;
+
+function isNetworkOrTimeout(error: unknown) {
+  return /fetch failed|timed? ?out|timeout|aborted|ECONNRESET|ETIMEDOUT|socket hang up|network/i.test(errorMessage(error));
+}
 
 export type AgentContent = { role: "user" | "model"; parts: Record<string, unknown>[] };
 
@@ -190,14 +232,30 @@ export type AgentStreamEvent =
   | { type: "thought"; text: string }
   | { type: "text"; text: string }
   | { type: "reset" }
+  | { type: "wait"; seconds: number; attempt: number; provider?: string }
   | { type: "done"; model: string; parts: Record<string, unknown>[] };
+
+const AGENT_ATTEMPTS = 4;
+const MAX_RETRY_WAIT_MS = 30_000;
+
+/** Gemini 429s say how long to back off ("retryDelay":"23s" / "Please retry in 23.4s"). */
+function retryDelayMs(error: unknown) {
+  const m = /retry(?:Delay)?\W{0,4}(?:in\s*)?(\d+(?:\.\d+)?)\s*s\b/i.exec(errorMessage(error));
+  return m ? Math.ceil(parseFloat(m[1]) * 1000) : null;
+}
+
+/** No access to this model on this key (or today's quota is gone): waiting won't help. */
+function isNoAccess(error: unknown) {
+  const msg = errorMessage(error);
+  return /not found|404|permission|limit: 0\b/i.test(msg) || (/quota/i.test(msg) && /per.?day/i.test(msg));
+}
 
 /**
  * One agent turn with native function calling. The model's parts (including
  * thoughtSignature on function calls) must be sent back verbatim on the next turn,
  * and the same model must be used for the whole run.
  */
-export async function* streamAgentTurn(opts: {
+export async function* streamGeminiAgentTurn(opts: {
   contents: AgentContent[];
   systemInstruction: string;
   functionDeclarations: Record<string, unknown>[];
@@ -209,11 +267,18 @@ export async function* streamAgentTurn(opts: {
   const candidates = all.filter((m) => (unavailableAgentModels.get(m) ?? 0) < now);
   if (!candidates.length) candidates.push(...all);
   let lastError: unknown;
+  /** "Busy / rate limited / timed out" explains a failure better than a later fallback's "model not found". */
+  let busyError: unknown;
+  let dailyQuotaHit = false;
 
   for (const modelName of candidates) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    // A pinned model can't be swapped mid-run (thought signatures), so it gets more patience.
+    const attempts = opts.model ? AGENT_ATTEMPTS : 2;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       const parts: Record<string, unknown>[] = [];
       let yielded = false;
+      const ctrl = new AbortController();
+      let timer = setTimeout(() => ctrl.abort(), FIRST_CHUNK_TIMEOUT_MS);
       try {
         const stream = await ai.models.generateContentStream({
           model: modelName,
@@ -223,9 +288,12 @@ export async function* streamAgentTurn(opts: {
             tools: [{ functionDeclarations: opts.functionDeclarations as never }],
             thinkingConfig: { includeThoughts: true },
             temperature: 0.2,
+            abortSignal: ctrl.signal,
           },
         });
         for await (const chunk of stream) {
+          clearTimeout(timer);
+          timer = setTimeout(() => ctrl.abort(), STALL_TIMEOUT_MS);
           for (const part of (chunk.candidates?.[0]?.content?.parts ?? []) as Record<string, unknown>[]) {
             parts.push(part);
             if (typeof part.text === "string" && part.text) {
@@ -239,27 +307,46 @@ export async function* streamAgentTurn(opts: {
         if (!parts.length) throw new Error("Empty response from Gemini");
         yield { type: "done", model: modelName, parts: mergeTextParts(parts) };
         return;
-      } catch (error) {
+      } catch (raw) {
+        const error = ctrl.signal.aborted ? new Error(`Gemini did not respond in time (timeout) on ${modelName}`) : raw;
         lastError = error;
         if (yielded) yield { type: "reset" };
-        const notOnThisKey = /not found|404|permission|quota|limit: 0/i.test(errorMessage(error));
-        if (isRetryable(error) && attempt < 2 && !notOnThisKey) {
-          await sleep(900 * attempt);
+        const notOnThisKey = isNoAccess(error);
+        if (isDailyQuota(error)) dailyQuotaHit = true;
+        const transient = (isRetryable(error) || isNetworkOrTimeout(error)) && !notOnThisKey;
+        if (transient) busyError = error;
+        if (transient && attempt < attempts) {
+          const waitMs = Math.min(retryDelayMs(error) ?? 2000 * 2 ** (attempt - 1), MAX_RETRY_WAIT_MS);
+          if (waitMs >= 3000) yield { type: "wait", seconds: Math.ceil(waitMs / 1000), attempt, provider: "Gemini" };
+          await sleep(waitMs);
           continue;
         }
-        if (isRetryable(error) || isModelSkip(error)) {
+        if (transient || isRetryable(error) || isModelSkip(error)) {
           if (!opts.model && notOnThisKey) {
             unavailableAgentModels.set(modelName, Date.now() + 10 * 60_000);
-            console.warn(`agent: skipping ${modelName} for 10 min — ${errorMessage(error).slice(0, 160)}`);
+            console.warn(`agent: skipping ${modelName} for 10 min — ${quotaSummary(error)}`);
+            const replacement = suggestedReplacement(error);
+            if (replacement && !candidates.includes(replacement)) {
+              suggestedAgentModels.add(replacement);
+              candidates.push(replacement);
+            }
           }
           break;
         }
         throw error;
+      } finally {
+        clearTimeout(timer);
       }
     }
   }
 
-  throw lastError instanceof Error ? lastError : new Error("Gemini is busy. Please try again in a moment.");
+  if (!busyError && dailyQuotaHit) {
+    throw new Error(
+      "Your Gemini key has used up today's free quota on every model it can use. It resets daily (about 12:30 PM IST). Enable billing on the key, or use another key, to keep going.",
+    );
+  }
+  const reason = busyError ?? lastError;
+  throw reason instanceof Error ? reason : new Error("Gemini is busy. Please try again in a moment.");
 }
 
 /** Streaming splits text into many tiny parts; join neighbours of the same kind (keeps signatures). */
@@ -619,6 +706,19 @@ export function formatAskError(error: unknown): { message: string; status: numbe
   let message = "Gemini request failed. Try again.";
   let status = 500;
 
+  if (error instanceof ProviderError) {
+    const why =
+      error.kind === "auth"
+        ? " — check that provider's API key."
+        : error.kind === "quota"
+          ? " — rate limit reached; wait a minute or add another provider key."
+          : "";
+    return { message: `${error.message.slice(0, 220)}${why}`, status: error.kind === "quota" ? 503 : 502 };
+  }
+  if (error instanceof Error && /^(Every AI provider failed|No AI provider)/.test(error.message)) {
+    return { message: error.message.slice(0, 600), status: 503 };
+  }
+
   if (error instanceof Error) {
     const msg = error.message;
     if (msg.includes("GEMINI_API_KEY")) {
@@ -634,7 +734,9 @@ export function formatAskError(error: unknown): { message: string; status: numbe
       msg.includes("429") ||
       msg.toLowerCase().includes("high demand")
     ) {
-      message = "AI is busy right now. Please wait a few seconds and try again.";
+      message = /quota|429|resource exhausted/i.test(msg)
+        ? "Gemini rate limit reached (free tier allows only a few requests per minute). Wait about a minute, then click Retry."
+        : "AI is busy right now. Please wait a few seconds and try again.";
       status = 503;
     } else if (msg.toLowerCase().includes("youtube") || msg.toLowerCase().includes("video")) {
       message =
