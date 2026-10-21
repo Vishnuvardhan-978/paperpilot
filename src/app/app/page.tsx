@@ -54,6 +54,7 @@ import {
 } from "@/lib/study-pack";
 import { exportTrustReceipt } from "@/lib/trust-receipt";
 import { bumpStudyActivity, getStudyStreak } from "@/lib/progress";
+import { addCards } from "@/lib/learning";
 import { canAsk, getAskUsage, recordAsk } from "@/lib/rate-limit";
 import {
   ACCEPTED_FILE_TYPES,
@@ -2513,6 +2514,19 @@ function CommandPalette({
   );
 }
 
+function SaveToDeckBtn({ cards, source }: { cards: { front: string; back: string }[]; source: string }) {
+  const [added, setAdded] = useState<number | null>(null);
+  return (
+    <button
+      type="button"
+      onClick={() => setAdded(addCards(cards, source))}
+      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[#415570] hover:text-[#00d4aa]"
+    >
+      {added === null ? "Save to deck" : added ? `Saved ${added}` : "Already in deck"}
+    </button>
+  );
+}
+
 function ProviderBadge({ by }: { by: NonNullable<Message["answeredBy"]> }) {
   const fellBack = by.skipped.length > 0;
   const title = [
@@ -3776,6 +3790,7 @@ function Bubble({
                 >
                   Anki TSV
                 </button>
+                <SaveToDeckBtn cards={cards} source={chatTitle || "Chat"} />
               </>
             )}
             {msg.content && (

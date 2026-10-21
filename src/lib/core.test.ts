@@ -5,6 +5,7 @@ import { diffStats, lineDiff } from "@/lib/line-diff";
 import { applySearchReplace, planFileEdit } from "@/lib/apply-edit";
 import { parseMediaRequest } from "@/lib/media-intent";
 import { flashcardsFromAnswer } from "@/lib/study-pack";
+import { parseQuiz, review } from "@/lib/learning";
 
 const ANSWER = `Photosynthesis turns light into sugar.
 
@@ -124,5 +125,37 @@ describe("study pack", () => {
     const cards = flashcardsFromAnswer(ANSWER, "Bio");
     expect(cards.map((c) => c.back)).toContain("Plants use chlorophyll");
     expect(cards.map((c) => c.front)).toContain("What is chlorophyll?");
+  });
+});
+
+describe("spaced repetition", () => {
+  const base = { id: "x", front: "f", back: "b", source: "s", lens: "study" as const, createdAt: 0, due: 0, interval: 0, ease: 2.5, reps: 0, lapses: 0 };
+  const DAY = 86_400_000;
+
+  it("grows intervals on good answers", () => {
+    const one = review(base, "good", 0);
+    const two = review(one, "good", one.due);
+    const three = review(two, "good", two.due);
+    expect([one.interval, two.interval]).toEqual([1, 6]);
+    expect(three.interval).toBeGreaterThan(12);
+    expect(three.due).toBe(two.due + three.interval * DAY);
+  });
+
+  it("resets on again and lowers ease", () => {
+    const r = review({ ...base, reps: 3, interval: 20 }, "again", 0);
+    expect(r).toMatchObject({ reps: 0, interval: 0, lapses: 1 });
+    expect(r.ease).toBeLessThan(2.5);
+    expect(r.ease).toBeGreaterThanOrEqual(1.3);
+  });
+});
+
+describe("parseQuiz", () => {
+  it("reads a JSON array inside prose and drops bad rows", () => {
+    const qs = parseQuiz('Here you go:\n[{"q":"2+2?","choices":["3","4"],"answer":1},{"q":"bad","choices":["a"],"answer":0}]');
+    expect(qs).toEqual([{ q: "2+2?", choices: ["3", "4"], answer: 1 }]);
+  });
+
+  it("returns [] for garbage", () => {
+    expect(parseQuiz("no quiz")).toEqual([]);
   });
 });
