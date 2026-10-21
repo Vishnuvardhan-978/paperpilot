@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -298,6 +299,7 @@ export default function App() {
   const [rateableRuns, setRateableRuns] = useState<ReadonlySet<string>>(() => new Set());
   const recogRef = useRef<{ stop: () => void } | null>(null);
   const [, tx] = useTransition();
+  const router = useRouter();
 
   const docs = useMemo(() => getDocuments(session), [session]);
   const hasWorkspace = docs.some((d) => d.kind === "workspace");
@@ -2407,6 +2409,9 @@ export default function App() {
           onClose={() => setCmdOpen(false)}
           actions={[
             { id: "new", label: "New chat", hint: "Ctrl+N", run: () => { newChat(); setCmdOpen(false); } },
+            { id: "settings", label: "Settings · API keys", run: () => { router.push("/settings"); } },
+            { id: "study", label: "Study · flashcards & quizzes", run: () => { router.push("/study"); } },
+            { id: "parent", label: "Parent dashboard", run: () => { router.push("/parent"); } },
             { id: "export", label: "Export chat", hint: "Ctrl+E", run: () => { setExportOpen(true); setCmdOpen(false); }, disabled: !session.messages.length },
             { id: "image", label: "Generate image", hint: "/image", run: () => { setQ("/image "); setCmdOpen(false); setTimeout(() => inputRef.current?.focus(), 50); }, disabled: asking },
             { id: "video", label: "Generate video", hint: "/video", run: () => { setQ("/video "); setCmdOpen(false); setTimeout(() => inputRef.current?.focus(), 50); }, disabled: asking },
