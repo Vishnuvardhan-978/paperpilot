@@ -83,3 +83,53 @@ to learn anything general; with a few files they memorise them instead.
 The loss (how wrong the next-token guesses are) falls from ~8.3 to ~1.5 for `mini` on TinyStories.
 A model this size learns grammar and simple stories, not facts or coding. That is what the
 PaperPilot-Coder track is for: it starts from a model that already read billions of lines of code.
+
+## PaperPilot-Coder: fine-tune and serve
+
+`coder/finetune.py` trains a LoRA adapter on your 👍 runs, on top of an open coding model
+(default `Qwen/Qwen2.5-Coder-1.5B-Instruct`, which fits a free Kaggle T4).
+
+### 1. Export the examples (your machine)
+
+```bash
+npm run training:export      # writes ~/.paperpilot/training/export/{train,val,bad}.jsonl
+```
+
+The export contains your project code from tool results. Upload it as a **private** Kaggle Dataset.
+
+### 2. Train (Kaggle, GPU T4, ~20–60 min for a few hundred runs)
+
+```bash
+!git clone https://github.com/Vishnuvardhan-978/paperpilot.git
+%cd paperpilot/training/coder
+!pip install -q -r requirements.txt
+!python finetune.py --data /kaggle/input/<your-dataset> --out /kaggle/working/out --merge
+```
+
+Bigger bases (`Qwen/Qwen2.5-Coder-7B-Instruct`) need a 24 GB+ GPU or 4-bit loading.
+Watch the eval loss: if it rises while train loss falls, lower `--epochs`.
+
+### 3. Serve it (any GPU box)
+
+vLLM, with tool calling turned on:
+
+```bash
+pip install vllm
+vllm serve ./out/merged --served-model-name paperpilot-coder --enable-auto-tool-choice --tool-call-parser hermes --port 8000
+```
+
+Or Ollama: convert `out/merged` to GGUF with llama.cpp's `convert_hf_to_gguf.py`, then
+`ollama create paperpilot-coder -f Modelfile` (Modelfile: `FROM ./paperpilot-coder.gguf`).
+Ollama's OpenAI-compatible URL is `http://<box>:11434/v1`.
+
+### 4. Point PaperPilot at it
+
+Open **Settings** in the app (or edit `.env.local`):
+
+```
+OPENAI_COMPAT_BASE_URL=http://<gpu-box>:8000/v1
+OPENAI_COMPAT_MODEL=paperpilot-coder
+AI_PROVIDERS=custom,gemini,groq        # try your model first, fall back to the others
+```
+
+The provider badge under each answer shows whether your model or a fallback answered.
