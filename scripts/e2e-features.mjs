@@ -575,6 +575,25 @@ async function main() {
     return "style=anime";
   });
 
+  await test("TC25 Illustrate turns an answer into a teaching picture", async () => {
+    await resetLearning();
+    await mockAsk();
+    await openApp();
+    await newChat();
+    await send("What is photosynthesis?");
+    await page.locator("text=fell back from Gemini").waitFor({ timeout: 20_000 });
+    const btn = page.locator('button:has-text("Illustrate")').last();
+    await btn.hover({ force: true }).catch(() => {});
+    await btn.click({ force: true });
+    await page.locator(".media-card img").last().waitFor({ timeout: 15_000 });
+    const b = imageBodies.at(-1);
+    expect(/educational illustration/.test(b.prompt) && /photosynthesis/i.test(b.prompt), `prompt: ${b.prompt}`);
+    expect(/Chlorophyll absorbs light energy/.test(b.prompt), "key points not used");
+    expect(b.style === "illustration" && b.aspect === "16:9", `style/aspect: ${b.style} ${b.aspect}`);
+    expect(await page.locator("text=Illustrate: What is photosynthesis?").count(), "chat entry missing");
+    return "labeled illustration from key points";
+  });
+
   await test("TC20 No uncaught errors in the browser", async () => {
     const real = pageErrors.filter((e) => !/Failed to fetch|NetworkError|ERR_INTERNET_DISCONNECTED|aborted/i.test(e));
     expect(!real.length, real.slice(0, 3).join(" | "));

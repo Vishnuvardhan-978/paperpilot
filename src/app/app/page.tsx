@@ -1461,6 +1461,19 @@ export default function App() {
     setSessions((p) => p.map((c) => (c.id === chatId ? updated : c)));
   }
 
+  /** A labeled teaching picture for an answer: the question plus the answer's key points guide the image. */
+  async function illustrateAnswer(topic: string, answer: string) {
+    const { body, doNext } = splitAnswerAndCitations(answer);
+    const points = (doNext?.keyPoints.length ? doNext.keyPoints : body.split(/(?<=[.!?])\s+/))
+      .map((p) => p.replace(/[*_`#>]/g, "").trim())
+      .filter(Boolean)
+      .slice(0, 3)
+      .join("; ");
+    const audience = getParentSettings().kidMode ? "for a 10-year-old, friendly and colorful" : "for a student";
+    const prompt = `educational illustration ${audience} explaining: ${topic.trim().slice(0, 160)}. Show: ${points.slice(0, 260)}. Clear labeled parts, simple shapes, plain background`;
+    await generateMedia({ kind: "image", prompt, aspect: "16:9" }, `Illustrate: ${topic.trim().slice(0, 120)}`);
+  }
+
   async function generateMedia(req: MediaRequest, displayText: string) {
     const um: Message = { id: newId(), role: "user", content: displayText };
     const assistantId = newId();
@@ -2201,6 +2214,7 @@ export default function App() {
                         onMediaUpdate={(patch) => void updateMedia(session.id, m.id, patch)}
                         onRateAgent={rateableRuns.has(m.id) ? (rating) => rateAgentRun(m.id, rating) : undefined}
                         onRegenerateMedia={regenerateMedia}
+                        onIllustrate={asking ? undefined : (topic, answer) => void illustrateAnswer(topic, answer)}
                         documentText={combinedDocumentText(docs)}
                         chatTitle={session.title}
                         onFindQuote={findInSources}
@@ -3595,6 +3609,7 @@ function Bubble({
   onMediaUpdate,
   onRegenerateMedia,
   onRateAgent,
+  onIllustrate,
 }: {
   msg: Message;
   idx: number;
@@ -3619,6 +3634,8 @@ function Bubble({
   onMediaUpdate?: (patch: Partial<MediaView>) => void;
   onRegenerateMedia?: (media: MediaView) => void;
   onRateAgent?: (rating: "good" | "bad") => Promise<void>;
+  /** Turns this answer into a teaching picture. */
+  onIllustrate?: (topic: string, answer: string) => void;
 }) {
   const user = msg.role === "user";
   if (user) {
@@ -3850,6 +3867,16 @@ function Bubble({
         {body && !streaming && !isStatusNote && (
           <div className="mt-1 flex flex-wrap gap-2 opacity-0 transition-opacity group-hover:opacity-100">
             <CopyBtn text={body} label="Copy answer" />
+            {onIllustrate && !msg.agent && priorUserQuestion && (
+              <button
+                type="button"
+                onClick={() => onIllustrate(priorUserQuestion, msg.content)}
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[#415570] hover:text-[#00d4aa]"
+                title="Make a labeled picture that explains this answer"
+              >
+                Illustrate
+              </button>
+            )}
             {canSpeak() && (
               <button
                 type="button"
