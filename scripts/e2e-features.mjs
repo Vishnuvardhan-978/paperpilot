@@ -223,7 +223,7 @@ async function main() {
   });
 
   await test("TC03 Agent permission choice persists", async () => {
-    await page.locator('button:has-text("deny")').last().click();
+    await page.locator("div", { has: page.locator("> span", { hasText: "Run terminal commands" }) }).locator('button:has-text("deny")').click();
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator("text=Coding agent permissions").waitFor();
     const saved = JSON.parse((await ls("paperpilot-agent-permissions")) || "{}");
