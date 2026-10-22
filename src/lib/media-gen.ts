@@ -17,7 +17,7 @@ export type VideoAspect = "16:9" | "9:16";
 
 export const MEDIA_DIR = path.join(os.homedir(), ".paperpilot", "media");
 
-export type GeneratedImage = { mimeType: string; data: string; provider: string; model: string };
+export type GeneratedImage = { mimeType: string; data: string; provider: string; model: string; seed?: number };
 
 type MediaModels = { geminiImage: string[]; imagen: string[]; veo: string[] };
 
@@ -61,8 +61,11 @@ async function mediaModels(ai: GoogleGenAI): Promise<MediaModels> {
 }
 
 function block(model: string, error: unknown) {
-  blocked.set(model, Date.now() + 30 * 60_000);
-  console.warn(`media: skipping ${model} for 30 min — ${message(error).replace(/\s+/g, " ").slice(0, 160)}`);
+  if ((blocked.get(model) ?? 0) > Date.now()) return; // a parallel request already blocked it
+  // "limit: 0" / billing errors mean this key never gets that model, so don't retry it for hours.
+  const hours = /limit: 0\b|billing|paid/i.test(message(error)) ? 6 : 0.5;
+  blocked.set(model, Date.now() + hours * 3_600_000);
+  console.warn(`media: skipping ${model} for ${hours}h — ${message(error).replace(/\s+/g, " ").slice(0, 160)}`);
 }
 
 const POLLINATIONS_SIZE: Record<ImageAspect, [number, number]> = {
@@ -86,10 +89,57 @@ async function pollinationsError(res: Response) {
   return `Pollinations failed (${res.status})${detail ? `: ${detail}` : ""}. Try again in a moment.`;
 }
 
-/** Keyed API when POLLINATIONS_API_KEY is set; otherwise the legacy keyless endpoint (often out of credits). */
-async function pollinationsImage(prompt: string, aspect: ImageAspect): Promise<GeneratedImage> {
-  const [width, height] = POLLINATIONS_SIZE[aspect];
-  const seed = Math.floor(Math.random() * 1_000_000);
+/** The keyless endpoint serves one image per user at a time; queue requests instead of tripping its limit. */
+let keylessQueue: Promise<unknown> = Promise.resolve();
+const RETRYABLE = /\((429|502|503|504)\)|at its limit|is busy|timeout|aborted/i;
+
+/** Keyed API when POLLINATIONS_API_KEY is set; otherwise the legacy keyless endpoint, queued and retried. */
+async function pollinationsImage(prompt: string, aspect: ImageAspect, fixedSeed?: number): Promise<GeneratedImage> {
+  const attempt = async () => {
+    let last: unknown;
+    for (let i = 0; i < 3; i++) {
+      try {
+        return await pollinationsOnce(prompt, aspect, fixedSeed);
+      } catch (e) {
+        last = e;
+        if (!RETRYABLE.test(message(e)) || i === 2) break;
+        const wait = Number(/retry after (\d+)\s*s/i.exec(message(e))?.[1] || 6);
+        await new Promise((r) => setTimeout(r, Math.min(25, wait) * 1000));
+      }
+    }
+    throw last;
+  };
+  if (pollinationsKey()) return attempt();
+  const run = keylessQueue.then(attempt, attempt);
+  keylessQueue = run.catch(() => {});
+  return run;
+}
+
+/** Until this time, keyless requests go straight to the small size the free tier still allows. */
+let keylessSmallUntil = 0;
+const KEYLESS_MAX_SIDE = 512;
+
+function smallSize([w, h]: [number, number]): [number, number] {
+  const scale = KEYLESS_MAX_SIDE / Math.max(w, h);
+  return [Math.round((w * scale) / 64) * 64, Math.round((h * scale) / 64) * 64];
+}
+
+async function pollinationsOnce(prompt: string, aspect: ImageAspect, fixedSeed?: number): Promise<GeneratedImage> {
+  const key = pollinationsKey();
+  if (!key && Date.now() < keylessSmallUntil) return pollinationsAt(prompt, aspect, fixedSeed, smallSize(POLLINATIONS_SIZE[aspect]));
+  try {
+    return await pollinationsAt(prompt, aspect, fixedSeed, POLLINATIONS_SIZE[aspect]);
+  } catch (e) {
+    // The keyless tier answers 402 for large images but still serves small ones.
+    if (key || !/HTTP 402/.test(message(e))) throw e;
+    keylessSmallUntil = Date.now() + 60 * 60_000;
+    console.warn(`media: free Pollinations refused full size; using ${KEYLESS_MAX_SIDE}px for an hour`);
+    return pollinationsAt(prompt, aspect, fixedSeed, smallSize(POLLINATIONS_SIZE[aspect]));
+  }
+}
+
+async function pollinationsAt(prompt: string, aspect: ImageAspect, fixedSeed: number | undefined, [width, height]: [number, number]): Promise<GeneratedImage> {
+  const seed = fixedSeed ?? Math.floor(Math.random() * 1_000_000);
   const key = pollinationsKey();
   const model = process.env.POLLINATIONS_IMAGE_MODEL?.trim() || "";
   const q = new URLSearchParams({ width: String(width), height: String(height), seed: String(seed), nologo: "true" });
@@ -99,15 +149,21 @@ async function pollinationsImage(prompt: string, aspect: ImageAspect): Promise<G
     : `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${q}`;
   const res = await fetch(url, {
     headers: key ? { Authorization: `Bearer ${key}` } : undefined,
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(75_000),
   });
   const type = res.headers.get("content-type") || "";
   if (!res.ok || !type.startsWith("image/")) {
-    if (!key && [401, 402, 403, 429].includes(res.status)) throw new Error(NO_IMAGE_PROVIDER);
+    // The keyless tier rate-limits with 402/429 + Retry-After: wait and retry, it is not "out of credits".
+    const retryAfter = Number(res.headers.get("retry-after"));
+    if (!key && [402, 429].includes(res.status) && retryAfter > 0) {
+      res.body?.cancel().catch(() => {});
+      throw new Error(`Free Pollinations is busy (${res.status}); retry after ${retryAfter}s`);
+    }
+    if (!key && [401, 402, 403].includes(res.status)) throw new Error(`${NO_IMAGE_PROVIDER} (Pollinations HTTP ${res.status})`);
     throw new Error(await pollinationsError(res));
   }
   const data = Buffer.from(await res.arrayBuffer()).toString("base64");
-  return { mimeType: type.split(";")[0], data, provider: key ? "Pollinations" : "Pollinations (free)", model: model || "default" };
+  return { mimeType: type.split(";")[0], data, provider: key ? "Pollinations" : "Pollinations (free)", model: model || "default", seed };
 }
 
 /** Cloudflare Workers AI (free daily allowance). Flux schnell has no size option, so images are square. */
@@ -129,7 +185,9 @@ async function cloudflareImage(account: string, token: string, model: string, pr
   return { mimeType: "image/jpeg", data: body.result.image, provider: "Cloudflare AI", model };
 }
 
-export async function generateImage(prompt: string, aspect: ImageAspect): Promise<GeneratedImage> {
+/** With `seed`, only Pollinations is used: it is the provider where a seed reproduces an image. */
+export async function generateImage(prompt: string, aspect: ImageAspect, opts: { seed?: number } = {}): Promise<GeneratedImage> {
+  if (opts.seed !== undefined) return pollinationsImage(prompt, aspect, opts.seed);
   let ai: GoogleGenAI | null = null;
   try {
     ai = getClient();

@@ -8,17 +8,19 @@ export function allowRequest(
   key: string,
   limit: number,
   windowMs: number,
+  /** How many units this request uses (e.g. images in one batch). */
+  cost = 1,
 ): { ok: boolean; retryAfterSec: number } {
   const now = Date.now();
   const b = buckets.get(key) || { timestamps: [] };
   b.timestamps = b.timestamps.filter((t) => now - t < windowMs);
-  if (b.timestamps.length >= limit) {
+  if (b.timestamps.length + cost > limit) {
     const oldest = b.timestamps[0] || now;
     const retryAfterSec = Math.max(1, Math.ceil((windowMs - (now - oldest)) / 1000));
     buckets.set(key, b);
     return { ok: false, retryAfterSec };
   }
-  b.timestamps.push(now);
+  for (let i = 0; i < cost; i++) b.timestamps.push(now);
   buckets.set(key, b);
   return { ok: true, retryAfterSec: 0 };
 }

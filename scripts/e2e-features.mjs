@@ -506,6 +506,75 @@ async function main() {
     return "banner toggles; manifest + service worker served";
   });
 
+  // ---- Image Studio (image route mocked: a 1×1 PNG per requested image) ----
+  const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  let imageBodies = [];
+  await page.route("**/api/media/image", async (route) => {
+    const b = JSON.parse(route.request().postData() || "{}");
+    imageBodies.push(b);
+    const n = b.count || 1;
+    const images = Array.from({ length: n }, (_, i) => ({ src: PNG, provider: "Mock", model: "m", seed: 100 + i }));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ...images[0], images, prompt: `${b.prompt}, enhanced (${b.style})`, enhanced: true, failed: 0 }),
+    });
+  });
+
+  await test("TC21 Studio creates images with style, shape and count", async () => {
+    await page.goto(`${BASE}/create`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(() => indexedDB.deleteDatabase("paperpilot-gallery"));
+    await page.reload({ waitUntil: "networkidle" });
+    const ideaBox = page.locator('textarea[placeholder^="What should the image show"]');
+    await ideaBox.fill("a fox reading a book");
+    await page.locator('button:has-text("Create image")').waitFor({ state: "visible" });
+    if ((await ideaBox.inputValue()) !== "a fox reading a book") await ideaBox.fill("a fox reading a book"); // typed before hydration
+    await page.locator('button:has-text("Anime")').click();
+    await page.locator('button:has-text("16:9")').click();
+    await page.getByRole("button", { name: "2", exact: true }).click();
+    await page.locator('button:has-text("Create 2 images")').click();
+    await page.locator("text=Gallery (2)").waitFor({ timeout: 10_000 });
+    const b = imageBodies.at(-1);
+    expect(b.style === "anime" && b.aspect === "16:9" && b.count === 2 && b.enhance === true, `request: ${JSON.stringify(b)}`);
+    expect(await page.locator("text=Prompt used:").count(), "enhanced prompt not shown");
+    return "2 images, anime, 16:9, enhanced";
+  });
+
+  await test("TC22 Gallery survives reload; favorite, filter and delete work", async () => {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator("text=Gallery (2)").waitFor({ timeout: 10_000 });
+    await page.locator("figure").first().hover();
+    await page.locator('figure button[title="Favorite"]').first().click();
+    await page.locator('button:has-text("★ Favorites")').click();
+    expect((await page.locator("figure").count()) === 1, "favorites filter shows the wrong number");
+    await page.locator('button:has-text("All")').click();
+    await page.locator("figure").nth(1).locator("button").first().click();
+    await page.locator('button:has-text("Delete")').click();
+    await page.locator("text=Gallery (1)").waitFor({ timeout: 5_000 });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.locator("text=Gallery (1)").waitFor({ timeout: 10_000 });
+    return "favorite kept, other deleted, both persist";
+  });
+
+  await test("TC23 '2 more like this' reuses the idea, style and shape", async () => {
+    await page.locator("figure button").first().click();
+    await page.locator('button:has-text("2 more like this")').click();
+    await page.locator("text=Gallery (3)").waitFor({ timeout: 10_000 });
+    const b = imageBodies.at(-1);
+    expect(b.prompt === "a fox reading a book" && b.style === "anime" && b.aspect === "16:9" && b.count === 2, `request: ${JSON.stringify(b)}`);
+    return "same idea/style/shape, 2 more";
+  });
+
+  await test("TC24 Chat image request picks up the style named in it", async () => {
+    await openApp();
+    await newChat();
+    await send("/image an anime cat on a rooftop");
+    await page.locator(".media-card img").last().waitFor({ timeout: 15_000 });
+    const b = imageBodies.at(-1);
+    expect(b.style === "anime", `style sent: ${b.style}`);
+    return "style=anime";
+  });
+
   await test("TC20 No uncaught errors in the browser", async () => {
     const real = pageErrors.filter((e) => !/Failed to fetch|NetworkError|ERR_INTERNET_DISCONNECTED|aborted/i.test(e));
     expect(!real.length, real.slice(0, 3).join(" | "));

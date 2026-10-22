@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 const NAV = [
   { href: "/app", label: "Tutor" },
+  { href: "/create", label: "Create" },
   { href: "/study", label: "Study" },
   { href: "/parent", label: "Parent" },
   { href: "/settings", label: "Settings" },

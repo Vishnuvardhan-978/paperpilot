@@ -56,6 +56,7 @@ import {
 import { exportTrustReceipt } from "@/lib/trust-receipt";
 import { bumpStudyActivity, getStudyStreak } from "@/lib/progress";
 import { addCards } from "@/lib/learning";
+import { detectStyle } from "@/lib/image-styles";
 import { TOOL_GROUPS, groupForTool, policyForTool, setToolPolicy } from "@/lib/agent-permissions";
 import { PdfQuoteViewer } from "@/components/pdf-quote-viewer";
 import { GitPanel } from "@/components/git-panel";
@@ -1489,7 +1490,8 @@ export default function App() {
       const res = await fetch(req.kind === "image" ? "/api/media/image" : "/api/media/video", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: req.prompt, aspect: req.aspect }),
+        // A style named in the request ("an anime cat") is applied server-side; the words stay in the prompt too.
+        body: JSON.stringify({ prompt: req.prompt, aspect: req.aspect, style: detectStyle(req.prompt) }),
         signal: controller.signal,
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -2457,6 +2459,7 @@ export default function App() {
             { id: "settings", label: "Settings · API keys", run: () => { router.push("/settings"); } },
             { id: "study", label: "Study · flashcards & quizzes", run: () => { router.push("/study"); } },
             { id: "parent", label: "Parent dashboard", run: () => { router.push("/parent"); } },
+            { id: "studio", label: "Image Studio · styles & gallery", run: () => { router.push("/create"); } },
             { id: "export", label: "Export chat", hint: "Ctrl+E", run: () => { setExportOpen(true); setCmdOpen(false); }, disabled: !session.messages.length },
             { id: "image", label: "Generate image", hint: "/image", run: () => { setQ("/image "); setCmdOpen(false); setTimeout(() => inputRef.current?.focus(), 50); }, disabled: asking },
             { id: "video", label: "Generate video", hint: "/video", run: () => { setQ("/video "); setCmdOpen(false); setTimeout(() => inputRef.current?.focus(), 50); }, disabled: asking },

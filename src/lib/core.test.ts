@@ -8,6 +8,8 @@ import { flashcardsFromAnswer } from "@/lib/study-pack";
 import { parseQuiz, review } from "@/lib/learning";
 import { findQuoteSpan } from "@/lib/quote-locate";
 import { isSensitive } from "@/lib/parental";
+import { applyStyle, detectStyle } from "@/lib/image-styles";
+import { allowRequest } from "@/lib/api-limit";
 
 const ANSWER = `Photosynthesis turns light into sugar.
 
@@ -184,5 +186,27 @@ describe("parental", () => {
   it("flags sensitive questions", () => {
     expect(isSensitive("how do I buy a gun")).toBe(true);
     expect(isSensitive("why is the sky blue")).toBe(false);
+  });
+});
+
+describe("image styles", () => {
+  it("detects a style named in the request", () => {
+    expect(detectStyle("an anime cat on a roof")).toBe("anime");
+    expect(detectStyle("a watercolor of a harbor")).toBe("watercolor");
+    expect(detectStyle("a cat")).toBe("none");
+  });
+
+  it("appends the style suffix once, without trailing punctuation", () => {
+    expect(applyStyle("a fox.", "pixel")).toBe("a fox, pixel art, 32-bit, crisp pixels, limited palette");
+    expect(applyStyle("a fox", "none")).toBe("a fox");
+  });
+});
+
+describe("rate limit cost", () => {
+  it("counts a batch as several requests", () => {
+    const key = `t-${Math.random()}`;
+    expect(allowRequest(key, 4, 60_000, 3).ok).toBe(true);
+    expect(allowRequest(key, 4, 60_000, 2).ok).toBe(false);
+    expect(allowRequest(key, 4, 60_000, 1).ok).toBe(true);
   });
 });
